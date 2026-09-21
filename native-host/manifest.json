@@ -1,0 +1,9 @@
+﻿{
+    "path":  "C:\\ytdlp-bridge-final\\native-host\\run-host.bat",
+    "description":  "Runs the locally installed yt-dlp for the yt-dlp bridge extension.",
+    "name":  "com.kcgamingtech.ytdlp_bridge",
+    "allowed_extensions":  [
+                               "ytdlp-bridge@kcgamingtech"
+                           ],
+    "type":  "stdio"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "ytdlp-bridge-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Firefox extension that drives a locally installed yt-dlp through a native messaging host.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "node build.mjs --tests && node --test dist-test/*.test.js",
+    "package": "node build.mjs && node build.mjs --zip",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('dist-test',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.4",
+    "@types/node": "^22.5.0"
+  }
+}

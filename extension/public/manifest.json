@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "yt-dlp bridge for YouTube",
+  "version": "2.0.0",
+  "description": "Download the YouTube video you are watching with the yt-dlp installed on your computer.",
+  "browser_specific_settings": {
+    "gecko": { "id": "ytdlp-bridge@kcgamingtech", "strict_min_version": "115.0" }
+  },
+  "permissions": ["nativeMessaging", "storage", "notifications"],
+  "host_permissions": ["*://www.youtube.com/*", "*://music.youtube.com/*"],
+  "background": { "scripts": ["background.js"] },
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/*", "*://music.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "yt-dlp downloads", "default_popup": "popup.html", "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" } },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "96": "icons/icon-96.png", "128": "icons/icon-128.png" }
+}

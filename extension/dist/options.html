@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>yt-dlp bridge</title><link rel="stylesheet" href="ui.css"></head>
+<body><main class="wrap">
+  <h1>yt-dlp bridge</h1>
+
+  <section>
+    <h2>Downloads</h2>
+    <div class="row"><label for="downloadDirectory">Download folder</label><input type="text" id="downloadDirectory" placeholder="Downloads" spellcheck="false"></div>
+    <div class="row"><label for="askWhereToSave">Ask where to save</label><input type="checkbox" id="askWhereToSave"></div>
+    <div class="row"><label for="videoQuality">Video quality</label>
+      <select id="videoQuality"><option value="best">Best</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option></select></div>
+    <div class="row"><label for="container">Video format</label>
+      <select id="container"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option></select></div>
+    <div class="row"><label for="audioFormat">Audio format</label>
+      <select id="audioFormat"><option value="best">Best</option><option value="m4a">M4A</option><option value="mp3">MP3</option><option value="opus">Opus</option></select></div>
+    <div class="row"><label for="notifications">Notifications</label><input type="checkbox" id="notifications"></div>
+  </section>
+
+  <section>
+    <h2>Dependencies</h2>
+    <div class="row"><span>Local helper</span><span id="s-host" class="muted">checking…</span></div>
+    <div class="row"><span>Python (used by the helper)</span><span id="s-python" class="muted"></span></div>
+    <div class="row"><span>yt-dlp</span><span id="s-ytdlp" class="muted"></span></div>
+    <div class="row"><span>FFmpeg</span><span id="s-ffmpeg" class="muted"></span></div>
+    <div class="row"><button id="test" class="primary">Test setup</button><span id="paths" class="muted"></span></div>
+    <div id="help"></div>
+  </section>
+
+  <section>
+    <details>
+      <summary>Advanced</summary>
+      <div class="row"><label for="ytdlpPath">yt-dlp path</label><input type="text" id="ytdlpPath" placeholder="auto-detect" spellcheck="false"></div>
+      <div class="row"><label for="ffmpegPath">FFmpeg path</label><input type="text" id="ffmpegPath" placeholder="auto-detect" spellcheck="false"></div>
+      <div class="row"><label for="mp3Quality">MP3 bitrate</label>
+        <select id="mp3Quality"><option value="best">Best</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option><option value="128">128 kbps</option></select></div>
+      <div class="row"><label for="overwrite">If the file exists</label>
+        <select id="overwrite"><option value="never">Keep the existing file</option><option value="overwrite">Overwrite it</option></select></div>
+      <div class="row"><label for="maxConcurrent">Downloads at once</label><input type="number" id="maxConcurrent" min="1" max="8"></div>
+      <div class="row"><label for="outputTemplate">Filename template</label><input type="text" id="outputTemplate" spellcheck="false"></div>
+      <div class="row"><button id="savePaths">Save advanced</button><span id="advNote" class="muted"></span></div>
+    </details>
+  </section>
+</main><script src="options.js"></script></body></html>
