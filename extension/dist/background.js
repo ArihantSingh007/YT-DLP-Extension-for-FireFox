@@ -13,7 +13,24 @@
     outputTemplate: "%(title)s [%(id)s].%(ext)s",
     overwrite: "never",
     maxConcurrent: 2,
-    lastMode: "video"
+    lastMode: "video",
+    embedThumbnail: true,
+    embedChapters: true,
+    embedMetadata: true,
+    writeSubtitles: false,
+    writeAutoSubtitles: false,
+    embedSubtitles: false,
+    subLangs: "en.*,all",
+    subFormat: "best",
+    sponsorblockRemove: "off",
+    sponsorblockMark: "off",
+    rateLimit: "",
+    concurrentFragments: 1,
+    proxy: "",
+    retries: 5,
+    cookiesBrowser: "none",
+    keepVideo: false,
+    customArgs: ""
   };
   async function getSettings() {
     const stored = await ext.storage.local.get("settings");
@@ -149,7 +166,10 @@
     ext.runtime.sendMessage(message).catch(() => void 0);
     const tabId = tabOfJob.get(id);
     if (tabId !== void 0) ext.tabs.sendMessage(tabId, message).catch(() => void 0);
-    if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") tabOfJob.delete(id);
+    if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+      tabOfJob.delete(id);
+      pruneOldJobs();
+    }
   }
   async function notify(id, success) {
     const settings = await getSettings();
@@ -164,15 +184,36 @@
     }).catch(() => void 0);
   }
   var cache = /* @__PURE__ */ new Map();
+  var inFlightInfo = /* @__PURE__ */ new Map();
   async function info(rawUrl) {
     const target = videoUrl(rawUrl);
     if (!target) throw { code: "BAD_URL", message: "This is not a YouTube video page." };
     const hit = cache.get(target.id);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
-    const data = await request("get_info", { url: target.url });
-    cache.set(target.id, { at: Date.now(), info: data });
-    if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
-    return data;
+    const existing = inFlightInfo.get(target.id);
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        const data = await request("get_info", { url: target.url });
+        cache.set(target.id, { at: Date.now(), info: data });
+        if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+        return data;
+      } finally {
+        inFlightInfo.delete(target.id);
+      }
+    })();
+    inFlightInfo.set(target.id, promise);
+    return promise;
+  }
+  var JOBS_MAX_HISTORY = 20;
+  function pruneOldJobs() {
+    if (jobs.size <= JOBS_MAX_HISTORY) return;
+    for (const [id, job] of jobs) {
+      if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+        jobs.delete(id);
+        if (jobs.size <= JOBS_MAX_HISTORY) break;
+      }
+    }
   }
   async function startDownload(message, tabId) {
     const target = videoUrl(String(message.url ?? ""));
@@ -180,7 +221,7 @@
     const settings = await getSettings();
     const mode = message.mode === "audio" ? "audio" : "video";
     const id = newId("job");
-    const job = { id, state: "queued", title: String(message.title ?? ""), label: String(message.label ?? ""), percent: 0 };
+    const job = { id, url: target.url, state: "queued", title: String(message.title ?? ""), label: String(message.label ?? ""), percent: 0 };
     jobs.set(id, job);
     if (tabId !== void 0) tabOfJob.set(id, tabId);
     try {
@@ -195,7 +236,24 @@
         outputDirectory: message.outputDirectory || settings.downloadDirectory || null,
         outputTemplate: settings.outputTemplate,
         overwrite: settings.overwrite,
-        maxConcurrent: settings.maxConcurrent
+        maxConcurrent: settings.maxConcurrent,
+        embedThumbnail: settings.embedThumbnail,
+        embedChapters: settings.embedChapters,
+        embedMetadata: settings.embedMetadata,
+        writeSubtitles: settings.writeSubtitles,
+        writeAutoSubtitles: settings.writeAutoSubtitles,
+        embedSubtitles: settings.embedSubtitles,
+        subLangs: settings.subLangs,
+        subFormat: settings.subFormat,
+        sponsorblockRemove: settings.sponsorblockRemove,
+        sponsorblockMark: settings.sponsorblockMark,
+        rateLimit: settings.rateLimit,
+        concurrentFragments: settings.concurrentFragments,
+        proxy: settings.proxy,
+        retries: settings.retries,
+        cookiesBrowser: settings.cookiesBrowser,
+        keepVideo: settings.keepVideo,
+        customArgs: settings.customArgs
       }, id);
       update(id, { state: "queued" });
     } catch (error) {
@@ -204,7 +262,32 @@
     }
     return job;
   }
-  var PAGE_ALLOWED = /* @__PURE__ */ new Set(["info", "deps", "download", "cancel"]);
+  var PAGE_ALLOWED = /* @__PURE__ */ new Set(["info", "deps", "download", "cancel", "jobForUrl", "openFolder", "openFile"]);
+  function openFolderSafe(message, fromPage) {
+    const jobId = message.jobId ? String(message.jobId) : "";
+    const path = message.path ? String(message.path) : "";
+    if (fromPage && !jobId) {
+      return Promise.reject({ code: "FORBIDDEN", message: "Job ID required to open folder from webpage." });
+    }
+    return request("open_folder", { jobId: jobId || void 0, path: path || void 0 });
+  }
+  function openFileSafe(message, fromPage) {
+    const jobId = message.jobId ? String(message.jobId) : "";
+    const path = message.path ? String(message.path) : "";
+    if (fromPage && !jobId) {
+      return Promise.reject({ code: "FORBIDDEN", message: "Job ID required to open file from webpage." });
+    }
+    return request("open_file", { jobId: jobId || void 0, path: path || void 0 });
+  }
+  function findJobForUrl(rawUrl) {
+    const target = videoUrl(rawUrl);
+    if (!target) return null;
+    const list = [...jobs.values()].reverse();
+    return list.find((j) => {
+      const jTarget = j.url ? videoUrl(j.url) : null;
+      return jTarget && jTarget.id === target.id;
+    }) ?? null;
+  }
   ext.runtime.onMessage.addListener((message, sender) => {
     if (!message?.type) return void 0;
     const fromPage = Boolean(sender?.tab);
@@ -216,18 +299,22 @@
       case "info":
         return done(info(String(message.url ?? "")));
       case "deps":
-        return done(request("get_status"));
+        return done(request("get_status", { refresh: Boolean(message.refresh) }));
       case "download":
         return done(startDownload(message, sender?.tab?.id));
       case "cancel":
         return done(request("cancel", { jobId: String(message.jobId ?? "") }));
       case "jobs":
         return Promise.resolve({ ok: true, data: [...jobs.values()].reverse() });
+      case "jobForUrl":
+        return Promise.resolve({ ok: true, data: findJobForUrl(String(message.url ?? "")) });
       case "forget":
         jobs.delete(String(message.jobId ?? ""));
         return Promise.resolve({ ok: true, data: null });
       case "openFolder":
-        return done(request("open_folder", { path: String(message.path ?? "") }));
+        return done(openFolderSafe(message, fromPage));
+      case "openFile":
+        return done(openFileSafe(message, fromPage));
       case "setPaths":
         return done(request("set_config", {
           ytdlpPath: String(message.ytdlpPath ?? ""),

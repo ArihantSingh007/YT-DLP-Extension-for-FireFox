@@ -109,5 +109,75 @@ class JobTests(unittest.TestCase):
                             for job in self.jobs.jobs.values()))
 
 
+    def test_download_args_with_advanced_options(self):
+        spec = {
+            "id": "jAdv",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "mode": "audio",
+            "format": "bestaudio/best",
+            "audioFormat": "mp3",
+            "audioQuality": "320",
+            "container": "mp4",
+            "overwrite": "overwrite",
+            "template": ytdlp.DEFAULT_TEMPLATE,
+            "dir": self.tmp,
+            "retries": 7,
+            "embedThumbnail": True,
+            "embedChapters": True,
+            "embedMetadata": True,
+            "writeSubtitles": True,
+            "writeAutoSubtitles": True,
+            "embedSubtitles": True,
+            "subLangs": "en,es",
+            "subFormat": "srt",
+            "sponsorblockRemove": "sponsor,selfpromo",
+            "sponsorblockMark": "sponsor",
+            "rateLimit": "5M",
+            "concurrentFragments": 4,
+            "proxy": "socks5://127.0.0.1:1080",
+            "cookiesBrowser": "firefox",
+            "keepVideo": True,
+            "customArgs": ["--geo-bypass", "--no-mtime"],
+        }
+        args = ytdlp.download_args(spec, "yt-dlp", "ffmpeg.exe")
+        self.assertIn("--embed-thumbnail", args)
+        self.assertIn("--embed-chapters", args)
+        self.assertIn("--embed-metadata", args)
+        self.assertIn("--write-subs", args)
+        self.assertIn("--write-auto-subs", args)
+        self.assertIn("--embed-subs", args)
+        self.assertIn("--sub-langs", args)
+        self.assertEqual(args[args.index("--sub-langs") + 1], "en,es")
+        self.assertIn("--convert-subs", args)
+        self.assertEqual(args[args.index("--convert-subs") + 1], "srt")
+        self.assertIn("--sponsorblock-remove", args)
+        self.assertEqual(args[args.index("--sponsorblock-remove") + 1], "sponsor,selfpromo")
+        self.assertIn("--sponsorblock-mark", args)
+        self.assertEqual(args[args.index("--sponsorblock-mark") + 1], "sponsor")
+        self.assertIn("--limit-rate", args)
+        self.assertEqual(args[args.index("--limit-rate") + 1], "5M")
+        self.assertIn("--concurrent-fragments", args)
+        self.assertEqual(args[args.index("--concurrent-fragments") + 1], "4")
+        self.assertIn("--proxy", args)
+        self.assertEqual(args[args.index("--proxy") + 1], "socks5://127.0.0.1:1080")
+        self.assertIn("--cookies-from-browser", args)
+        self.assertEqual(args[args.index("--cookies-from-browser") + 1], "firefox")
+        self.assertIn("--keep-video", args)
+        self.assertIn("--geo-bypass", args)
+        self.assertIn("--no-mtime", args)
+        self.assertIn("--force-overwrites", args)
+
+    def test_custom_args_security_filtering(self):
+        import validate
+        # Disallowed and shell metacharacters are safely filtered
+        cleaned = validate.custom_args("--geo-bypass --exec calc.exe --config-location bad.conf ; rm -rf / | foo")
+        self.assertIn("--geo-bypass", cleaned)
+        self.assertNotIn("--exec", cleaned)
+        self.assertNotIn("--config-location", cleaned)
+        self.assertNotIn("calc.exe", cleaned)
+        self.assertNotIn(";", cleaned)
+        self.assertNotIn("|", cleaned)
+
+
 if __name__ == "__main__":
     unittest.main()

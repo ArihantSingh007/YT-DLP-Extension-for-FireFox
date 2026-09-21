@@ -125,7 +125,10 @@ function update(id: string, patch: Partial<Job>): void {
   ext.runtime.sendMessage(message).catch(() => undefined);   // popup, if open
   const tabId = tabOfJob.get(id);
   if (tabId !== undefined) ext.tabs.sendMessage(tabId, message).catch(() => undefined);
-  if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") tabOfJob.delete(id);
+  if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+    tabOfJob.delete(id);
+    pruneOldJobs();
+  }
 }
 
 async function notify(id: string, success: boolean): Promise<void> {
@@ -144,19 +147,45 @@ async function notify(id: string, success: boolean): Promise<void> {
 // ------------------------------------------------------------ metadata cache
 
 const cache = new Map<string, { at: number; info: VideoInfo }>();
+const inFlightInfo = new Map<string, Promise<VideoInfo>>();
 
 async function info(rawUrl: string): Promise<VideoInfo> {
   const target = videoUrl(rawUrl);
   if (!target) throw { code: "BAD_URL", message: "This is not a YouTube video page." };
   const hit = cache.get(target.id);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.info;
-  const data = await request<VideoInfo>("get_info", { url: target.url });
-  cache.set(target.id, { at: Date.now(), info: data });
-  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
-  return data;
+
+  const existing = inFlightInfo.get(target.id);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    try {
+      const data = await request<VideoInfo>("get_info", { url: target.url });
+      cache.set(target.id, { at: Date.now(), info: data });
+      if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
+      return data;
+    } finally {
+      inFlightInfo.delete(target.id);
+    }
+  })();
+
+  inFlightInfo.set(target.id, promise);
+  return promise;
 }
 
 // --------------------------------------------------------------- downloads
+
+const JOBS_MAX_HISTORY = 20;
+
+function pruneOldJobs(): void {
+  if (jobs.size <= JOBS_MAX_HISTORY) return;
+  for (const [id, job] of jobs) {
+    if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+      jobs.delete(id);
+      if (jobs.size <= JOBS_MAX_HISTORY) break;
+    }
+  }
+}
 
 async function startDownload(message: any, tabId?: number): Promise<Job> {
   const target = videoUrl(String(message.url ?? ""));
@@ -165,7 +194,7 @@ async function startDownload(message: any, tabId?: number): Promise<Job> {
   const mode = message.mode === "audio" ? "audio" : "video";
   const id = newId("job");
 
-  const job: Job = { id, state: "queued", title: String(message.title ?? ""), label: String(message.label ?? ""), percent: 0 };
+  const job: Job = { id, url: target.url, state: "queued", title: String(message.title ?? ""), label: String(message.label ?? ""), percent: 0 };
   jobs.set(id, job);
   if (tabId !== undefined) tabOfJob.set(id, tabId);
 
@@ -182,6 +211,23 @@ async function startDownload(message: any, tabId?: number): Promise<Job> {
       outputTemplate: settings.outputTemplate,
       overwrite: settings.overwrite,
       maxConcurrent: settings.maxConcurrent,
+      embedThumbnail: settings.embedThumbnail,
+      embedChapters: settings.embedChapters,
+      embedMetadata: settings.embedMetadata,
+      writeSubtitles: settings.writeSubtitles,
+      writeAutoSubtitles: settings.writeAutoSubtitles,
+      embedSubtitles: settings.embedSubtitles,
+      subLangs: settings.subLangs,
+      subFormat: settings.subFormat,
+      sponsorblockRemove: settings.sponsorblockRemove,
+      sponsorblockMark: settings.sponsorblockMark,
+      rateLimit: settings.rateLimit,
+      concurrentFragments: settings.concurrentFragments,
+      proxy: settings.proxy,
+      retries: settings.retries,
+      cookiesBrowser: settings.cookiesBrowser,
+      keepVideo: settings.keepVideo,
+      customArgs: settings.customArgs,
     }, id);
     update(id, { state: "queued" });
   } catch (error: any) {
@@ -193,7 +239,35 @@ async function startDownload(message: any, tabId?: number): Promise<Job> {
 
 // -------------------------------------------------------------- message hub
 
-const PAGE_ALLOWED = new Set(["info", "deps", "download", "cancel"]);
+const PAGE_ALLOWED = new Set(["info", "deps", "download", "cancel", "jobForUrl", "openFolder", "openFile"]);
+
+function openFolderSafe(message: any, fromPage: boolean): Promise<any> {
+  const jobId = message.jobId ? String(message.jobId) : "";
+  const path = message.path ? String(message.path) : "";
+  if (fromPage && !jobId) {
+    return Promise.reject({ code: "FORBIDDEN", message: "Job ID required to open folder from webpage." });
+  }
+  return request("open_folder", { jobId: jobId || undefined, path: path || undefined });
+}
+
+function openFileSafe(message: any, fromPage: boolean): Promise<any> {
+  const jobId = message.jobId ? String(message.jobId) : "";
+  const path = message.path ? String(message.path) : "";
+  if (fromPage && !jobId) {
+    return Promise.reject({ code: "FORBIDDEN", message: "Job ID required to open file from webpage." });
+  }
+  return request("open_file", { jobId: jobId || undefined, path: path || undefined });
+}
+
+function findJobForUrl(rawUrl: string): Job | null {
+  const target = videoUrl(rawUrl);
+  if (!target) return null;
+  const list = [...jobs.values()].reverse();
+  return list.find((j) => {
+    const jTarget = j.url ? videoUrl(j.url) : null;
+    return jTarget && jTarget.id === target.id;
+  }) ?? null;
+}
 
 ext.runtime.onMessage.addListener((message: any, sender: any) => {
   if (!message?.type) return undefined;
@@ -205,13 +279,15 @@ ext.runtime.onMessage.addListener((message: any, sender: any) => {
     promise.then((data) => ({ ok: true, data })).catch((error) => ({ ok: false, error }));
 
   switch (message.type) {
-    case "info":     return done(info(String(message.url ?? "")));
-    case "deps":     return done(request<Deps>("get_status"));
-    case "download": return done(startDownload(message, sender?.tab?.id));
-    case "cancel":   return done(request("cancel", { jobId: String(message.jobId ?? "") }));
-    case "jobs":     return Promise.resolve({ ok: true, data: [...jobs.values()].reverse() });
-    case "forget":   jobs.delete(String(message.jobId ?? "")); return Promise.resolve({ ok: true, data: null });
-    case "openFolder": return done(request("open_folder", { path: String(message.path ?? "") }));
+    case "info":       return done(info(String(message.url ?? "")));
+    case "deps":       return done(request<Deps>("get_status", { refresh: Boolean(message.refresh) }));
+    case "download":   return done(startDownload(message, sender?.tab?.id));
+    case "cancel":     return done(request("cancel", { jobId: String(message.jobId ?? "") }));
+    case "jobs":       return Promise.resolve({ ok: true, data: [...jobs.values()].reverse() });
+    case "jobForUrl":  return Promise.resolve({ ok: true, data: findJobForUrl(String(message.url ?? "")) });
+    case "forget":     jobs.delete(String(message.jobId ?? "")); return Promise.resolve({ ok: true, data: null });
+    case "openFolder": return done(openFolderSafe(message, fromPage));
+    case "openFile":   return done(openFileSafe(message, fromPage));
     case "setPaths": return done(request("set_config", {
       ytdlpPath: String(message.ytdlpPath ?? ""),
       ffmpegPath: String(message.ffmpegPath ?? ""),

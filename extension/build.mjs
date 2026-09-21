@@ -84,18 +84,7 @@ async function buildTests() {
 }
 
 /** Minimal store/deflate zip writer so packaging needs no extra dependency. */
-function zipDirectory(sourceDir, outFile) {
-  const files = [];
-  const walk = (dir, prefix = "") => {
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
-      const name = prefix ? `${prefix}/${entry}` : entry;
-      if (statSync(full).isDirectory()) walk(full, name);
-      else files.push({ name, data: readFileSync(full) });
-    }
-  };
-  walk(sourceDir);
-
+function writeZip(files, outFile) {
   const chunks = [];
   const central = [];
   let offset = 0;
@@ -135,15 +124,60 @@ function zipDirectory(sourceDir, outFile) {
   end.writeUInt32LE(offset, 16);
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, Buffer.concat([...chunks, centralBuffer, end]));
+}
+
+function zipDirectory(sourceDir, outFile) {
+  const files = [];
+  const walk = (dir, prefix = "") => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const name = prefix ? `${prefix}/${entry}` : entry;
+      if (statSync(full).isDirectory()) walk(full, name);
+      else files.push({ name, data: readFileSync(full) });
+    }
+  };
+  walk(sourceDir);
+  writeZip(files, outFile);
   console.log(`packaged ${relative(root, outFile)}`);
+}
+
+function packageCleanSource(projectRoot, outFile) {
+  const ignoredDirs = new Set([
+    ".git", "node_modules", "dist", "dist-test", "web-ext-artifacts",
+    "__pycache__", ".pytest_cache", ".system_generated", ".user_uploaded", ".gemini"
+  ]);
+  const ignoredExts = new Set([".pyc", ".pyo", ".log", ".tmp", ".swp"]);
+
+  const files = [];
+  const walk = (dir, prefix = "") => {
+    for (const entry of readdirSync(dir)) {
+      if (entry.startsWith(".") && entry !== ".gitignore") continue;
+      if (ignoredDirs.has(entry)) continue;
+      const full = join(dir, entry);
+      const name = prefix ? `${prefix}/${entry}` : entry;
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        walk(full, name);
+      } else {
+        const ext = entry.slice(entry.lastIndexOf(".")).toLowerCase();
+        if (ignoredExts.has(ext)) continue;
+        files.push({ name, data: readFileSync(full) });
+      }
+    }
+  };
+  walk(projectRoot);
+  writeZip(files, outFile);
+  console.log(`packaged clean source ${relative(root, outFile)} (${files.length} source files, 0 node_modules, 0 .git)`);
 }
 
 if (args.has("--tests")) {
   await buildTests();
-} else if (args.has("--zip")) {
+} else if (args.has("--zip") || args.has("--package")) {
   if (!existsSync(dist)) await buildExtension();
   const manifest = JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8"));
-  zipDirectory(dist, join(root, "web-ext-artifacts", `ytdlp-bridge-${manifest.version}.zip`));
+  const artifactsDir = join(root, "web-ext-artifacts");
+  zipDirectory(dist, join(artifactsDir, `ytdlp-bridge-${manifest.version}.zip`));
+  packageCleanSource(dirname(root), join(artifactsDir, `ytdlp-bridge-${manifest.version}-source.zip`));
 } else {
   await buildExtension();
 }

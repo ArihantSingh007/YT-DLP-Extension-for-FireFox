@@ -1,43 +1,456 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>yt-dlp bridge</title><link rel="stylesheet" href="ui.css"></head>
-<body><main class="wrap">
-  <h1>yt-dlp bridge</h1>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>yt-dlp bridge Settings</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+  <main class="wrap">
+    <header class="app-header">
+      <div class="app-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+      </div>
+      <div class="app-title-group">
+        <h1>yt-dlp bridge <span class="version-pill">v2.0.0</span></h1>
+        <p class="app-desc">Download YouTube videos and audio using your computer's local yt-dlp.</p>
+      </div>
+    </header>
 
-  <section>
-    <h2>Downloads</h2>
-    <div class="row"><label for="downloadDirectory">Download folder</label><input type="text" id="downloadDirectory" placeholder="Downloads" spellcheck="false"></div>
-    <div class="row"><label for="askWhereToSave">Ask where to save</label><input type="checkbox" id="askWhereToSave"></div>
-    <div class="row"><label for="videoQuality">Video quality</label>
-      <select id="videoQuality"><option value="best">Best</option><option value="2160">2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option></select></div>
-    <div class="row"><label for="container">Video format</label>
-      <select id="container"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option></select></div>
-    <div class="row"><label for="audioFormat">Audio format</label>
-      <select id="audioFormat"><option value="best">Best</option><option value="m4a">M4A</option><option value="mp3">MP3</option><option value="opus">Opus</option></select></div>
-    <div class="row"><label for="notifications">Notifications</label><input type="checkbox" id="notifications"></div>
-  </section>
+    <!-- Downloads Configuration -->
+    <section class="card-section">
+      <h2 class="card-title">Download Settings</h2>
 
-  <section>
-    <h2>Dependencies</h2>
-    <div class="row"><span>Local helper</span><span id="s-host" class="muted">checking…</span></div>
-    <div class="row"><span>Python (used by the helper)</span><span id="s-python" class="muted"></span></div>
-    <div class="row"><span>yt-dlp</span><span id="s-ytdlp" class="muted"></span></div>
-    <div class="row"><span>FFmpeg</span><span id="s-ffmpeg" class="muted"></span></div>
-    <div class="row"><button id="test" class="primary">Test setup</button><span id="paths" class="muted"></span></div>
-    <div id="help"></div>
-  </section>
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="downloadDirectory">Download folder</label>
+          <span class="label-desc">Leave empty to use your system's default Downloads folder</span>
+        </div>
+        <input type="text" id="downloadDirectory" placeholder="Default (Downloads)" spellcheck="false">
+      </div>
 
-  <section>
-    <details>
-      <summary>Advanced</summary>
-      <div class="row"><label for="ytdlpPath">yt-dlp path</label><input type="text" id="ytdlpPath" placeholder="auto-detect" spellcheck="false"></div>
-      <div class="row"><label for="ffmpegPath">FFmpeg path</label><input type="text" id="ffmpegPath" placeholder="auto-detect" spellcheck="false"></div>
-      <div class="row"><label for="mp3Quality">MP3 bitrate</label>
-        <select id="mp3Quality"><option value="best">Best</option><option value="320">320 kbps</option><option value="256">256 kbps</option><option value="192">192 kbps</option><option value="128">128 kbps</option></select></div>
-      <div class="row"><label for="overwrite">If the file exists</label>
-        <select id="overwrite"><option value="never">Keep the existing file</option><option value="overwrite">Overwrite it</option></select></div>
-      <div class="row"><label for="maxConcurrent">Downloads at once</label><input type="number" id="maxConcurrent" min="1" max="8"></div>
-      <div class="row"><label for="outputTemplate">Filename template</label><input type="text" id="outputTemplate" spellcheck="false"></div>
-      <div class="row"><button id="savePaths">Save advanced</button><span id="advNote" class="muted"></span></div>
-    </details>
-  </section>
-</main><script src="options.js"></script></body></html>
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="askWhereToSave">Ask where to save</label>
+          <span class="label-desc">Show folder input in the download popup for custom destinations</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="askWhereToSave">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="videoQuality">Default video quality</label>
+          <span class="label-desc">Preferred video resolution ceiling</span>
+        </div>
+        <select id="videoQuality">
+          <option value="best">Best available</option>
+          <option value="2160">4K (2160p)</option>
+          <option value="1440">2K (1440p)</option>
+          <option value="1080">Full HD (1080p)</option>
+          <option value="720">HD (720p)</option>
+          <option value="480">SD (480p)</option>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="container">Video format container</label>
+          <span class="label-desc">Merged video container format</span>
+        </div>
+        <select id="container">
+          <option value="mp4">MP4 (Recommended)</option>
+          <option value="mkv">MKV</option>
+          <option value="webm">WebM</option>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="audioFormat">Default audio format</label>
+          <span class="label-desc">Format when downloading music or audio-only</span>
+        </div>
+        <select id="audioFormat">
+          <option value="best">Best available</option>
+          <option value="m4a">M4A (AAC)</option>
+          <option value="mp3">MP3 (Transcoded)</option>
+          <option value="opus">Opus</option>
+        </select>
+      </div>
+
+      <div class="form-row">
+        <div class="label-col">
+          <label class="label-title" for="notifications">Desktop notifications</label>
+          <span class="label-desc">Notify when a download completes or encounters an error</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="notifications">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <!-- Dependencies Status -->
+    <section class="card-section">
+      <h2 class="card-title">System & Dependencies</h2>
+
+      <div class="dep-row">
+        <span class="label-title">Local helper</span>
+        <span id="s-host" class="pill-badge">checking…</span>
+      </div>
+      <div class="dep-row">
+        <span class="label-title">Python runtime</span>
+        <span id="s-python" class="pill-badge">checking…</span>
+      </div>
+      <div class="dep-row">
+        <span class="label-title">yt-dlp tool</span>
+        <span id="s-ytdlp" class="pill-badge">checking…</span>
+      </div>
+      <div class="dep-row">
+        <span class="label-title">FFmpeg tool</span>
+        <span id="s-ffmpeg" class="pill-badge">checking…</span>
+      </div>
+
+      <div class="active-folder-card">
+        <svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        </svg>
+        <span id="paths" class="dir-text">—</span>
+      </div>
+
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 14px;">
+        <button id="test" class="btn primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+          <span>Test setup</span>
+        </button>
+      </div>
+
+      <div id="help"></div>
+    </section>
+
+    <!-- Advanced Configuration -->
+    <section class="card-section">
+      <details>
+        <summary>
+          <span>Advanced Options</span>
+          <svg class="arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </summary>
+
+        <div class="advanced-content">
+          <!-- 1. Media & Metadata -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">🏷️ Media & Metadata Embedding</h3>
+              <p class="group-desc">Embed artwork, chapter markers, and tags directly into downloaded files</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="embedThumbnail">Embed thumbnail as cover art</label>
+                <span class="label-desc">Adds video thumbnail directly to MP4/MKV/MP3/M4A (--embed-thumbnail)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="embedThumbnail">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="embedChapters">Embed video chapters</label>
+                <span class="label-desc">Adds YouTube chapter timestamp marks to media container (--embed-chapters)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="embedChapters">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="embedMetadata">Embed video metadata</label>
+                <span class="label-desc">Write title, artist, upload date, and tags into file (--embed-metadata)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="embedMetadata">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 2. Subtitles & Captions -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">💬 Subtitles & Captions</h3>
+              <p class="group-desc">Configure subtitle downloads, auto-generated captions, and language selection</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="writeSubtitles">Download subtitles</label>
+                <span class="label-desc">Save official subtitles alongside the video (--write-subs)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="writeSubtitles">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="writeAutoSubtitles">Include auto-generated captions</label>
+                <span class="label-desc">Fallback to YouTube automatic captions if official subs are missing (--write-auto-subs)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="writeAutoSubtitles">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="embedSubtitles">Embed subtitles in video</label>
+                <span class="label-desc">Mux subtitles into MKV/MP4 container (--embed-subs, requires FFmpeg)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="embedSubtitles">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="subLangs">Subtitle languages</label>
+                <span class="label-desc">Comma-separated language codes or regex (e.g. "en.*,all", "en,es,hi")</span>
+              </div>
+              <input type="text" id="subLangs" placeholder="en.*,all" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="subFormat">Subtitle format</label>
+                <span class="label-desc">Convert subtitles to chosen format (--convert-subs)</span>
+              </div>
+              <select id="subFormat">
+                <option value="best">Original / Best</option>
+                <option value="srt">SubRip (.srt)</option>
+                <option value="vtt">WebVTT (.vtt)</option>
+                <option value="ass">Advanced SubStation (.ass)</option>
+                <option value="lrc">LRC Lyrics (.lrc)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 3. SponsorBlock -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">🛡️ SponsorBlock (Skip Ads & Promos)</h3>
+              <p class="group-desc">Automatically remove or mark sponsored segments using the community SponsorBlock database</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="sponsorblockRemove">Remove sponsor segments</label>
+                <span class="label-desc">Cut out unwanted segments from downloaded video (--sponsorblock-remove)</span>
+              </div>
+              <select id="sponsorblockRemove">
+                <option value="off">Off (Keep everything)</option>
+                <option value="sponsor">Sponsors only</option>
+                <option value="sponsor,selfpromo">Sponsors & Self-promotions</option>
+                <option value="sponsor,selfpromo,interaction">Sponsors, Self-promotions & Subscribe reminders</option>
+                <option value="all">All non-music/promotional segments</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="sponsorblockMark">Mark sponsor segments</label>
+                <span class="label-desc">Mark segments as chapters without cutting them out (--sponsorblock-mark)</span>
+              </div>
+              <select id="sponsorblockMark">
+                <option value="off">Off</option>
+                <option value="sponsor">Sponsors only</option>
+                <option value="all">All segments</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 4. Network & Performance -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">⚡ Network, Speed & Multi-Threading</h3>
+              <p class="group-desc">Speed limits, multi-threaded fragment downloads, and proxy settings</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="rateLimit">Download speed limit</label>
+                <span class="label-desc">Maximum bandwidth limit, e.g. "5M", "500K" (leave empty for unlimited)</span>
+              </div>
+              <input type="text" id="rateLimit" placeholder="Unlimited" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="concurrentFragments">Concurrent fragments</label>
+                <span class="label-desc">Parallel fragment download threads for DASH/HLS streams (1 to 16)</span>
+              </div>
+              <input type="number" id="concurrentFragments" min="1" max="16" placeholder="1">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="proxy">Proxy URL</label>
+                <span class="label-desc">HTTP, HTTPS, or SOCKS5 proxy (e.g. "socks5://127.0.0.1:1080")</span>
+              </div>
+              <input type="text" id="proxy" placeholder="Direct connection" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="retries">Network retries</label>
+                <span class="label-desc">Number of retry attempts on network timeouts</span>
+              </div>
+              <input type="number" id="retries" min="1" max="30" placeholder="5">
+            </div>
+          </div>
+
+          <!-- 5. Authentication & Cookies -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">🍪 Authentication & Browser Cookies</h3>
+              <p class="group-desc">Access age-restricted, members-only, and private videos using your browser login</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="cookiesBrowser">Import cookies from browser</label>
+                <span class="label-desc">Automatically reads session cookies (--cookies-from-browser) without sharing passwords</span>
+              </div>
+              <select id="cookiesBrowser">
+                <option value="none">None (Public downloads only)</option>
+                <option value="firefox">Mozilla Firefox</option>
+                <option value="chrome">Google Chrome</option>
+                <option value="edge">Microsoft Edge</option>
+                <option value="brave">Brave</option>
+                <option value="chromium">Chromium</option>
+                <option value="vivaldi">Vivaldi</option>
+                <option value="opera">Opera</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 6. Audio & Processing -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">🎵 Audio & Conversion Rules</h3>
+              <p class="group-desc">Bitrates, transcoding settings, and post-processing rules</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="mp3Quality">MP3 transcode bitrate</label>
+                <span class="label-desc">Target audio bitrate when converting to MP3</span>
+              </div>
+              <select id="mp3Quality">
+                <option value="best">Best (VBR 0)</option>
+                <option value="320">320 kbps (CBR)</option>
+                <option value="256">256 kbps (CBR)</option>
+                <option value="192">192 kbps (CBR)</option>
+                <option value="128">128 kbps (CBR)</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="keepVideo">Keep original video file</label>
+                <span class="label-desc">Retain the downloaded video file on disk after extracting audio (--keep-video)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="keepVideo">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 7. System Rules & Paths -->
+          <div class="advanced-group">
+            <div class="group-header">
+              <h3 class="group-title">⚙️ System Paths & Extra Arguments</h3>
+              <p class="group-desc">Executable paths, file naming templates, and power-user arguments</p>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="ytdlpPath">Custom yt-dlp binary</label>
+                <span class="label-desc">Specify full path if not detected in standard PATH</span>
+              </div>
+              <input type="text" id="ytdlpPath" placeholder="auto-detect" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="ffmpegPath">Custom FFmpeg binary</label>
+                <span class="label-desc">Specify full path if not detected in standard PATH</span>
+              </div>
+              <input type="text" id="ffmpegPath" placeholder="auto-detect" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="overwrite">Duplicate filename policy</label>
+                <span class="label-desc">Behavior when target filename already exists</span>
+              </div>
+              <select id="overwrite">
+                <option value="never">Keep existing (auto-rename)</option>
+                <option value="overwrite">Overwrite existing file</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="maxConcurrent">Max concurrent downloads</label>
+                <span class="label-desc">Simultaneous active downloads limit (1 to 8)</span>
+              </div>
+              <input type="number" id="maxConcurrent" min="1" max="8">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="outputTemplate">Filename output template</label>
+                <span class="label-desc">yt-dlp template string (e.g. "%(title)s [%(id)s].%(ext)s")</span>
+              </div>
+              <input type="text" id="outputTemplate" spellcheck="false">
+            </div>
+
+            <div class="form-row">
+              <div class="label-col">
+                <label class="label-title" for="customArgs">Additional yt-dlp flags</label>
+                <span class="label-desc">Extra arguments for power users (e.g. "--geo-bypass --no-mtime")</span>
+              </div>
+              <input type="text" id="customArgs" placeholder="--geo-bypass" spellcheck="false">
+            </div>
+          </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 24px;">
+            <button id="savePaths" class="btn primary">Save All Settings</button>
+            <span id="advNote" class="label-desc"></span>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

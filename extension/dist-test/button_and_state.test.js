@@ -1,56 +1,251 @@
-/**
- * Content script. Finds the YouTube action bar, hooks YouTube's existing Download
- * button on watch pages (or adds a custom one on Shorts / fallback), and renders
- * a stable dialog in a shadow root.
- */
-import { bytes, clock, ext, getSettings, send, setSettings, videoUrl,
-  type Choice, type Deps, type Job, type Settings, type VideoInfo } from "./shared";
-import { audioChoices, videoChoices } from "./formats";
+// src/test/button_and_state.test.ts
+import { strict as assert } from "node:assert";
+import test from "node:test";
 
-export const BUTTON_ID = "ytdlp-bridge-btn";
-export const HOST_ID = "ytdlp-bridge-ui";
+// src/shared.ts
+var ext = globalThis.browser ?? globalThis.chrome;
+async function send(message) {
+  try {
+    return await ext.runtime.sendMessage(message);
+  } catch (cause) {
+    return { ok: false, error: { code: "EXTENSION_ERROR", message: "The extension is not responding.", detail: String(cause?.message ?? cause) } };
+  }
+}
+var DEFAULTS = {
+  downloadDirectory: "",
+  askWhereToSave: false,
+  videoQuality: "best",
+  container: "mp4",
+  audioFormat: "m4a",
+  notifications: true,
+  mp3Quality: "320",
+  outputTemplate: "%(title)s [%(id)s].%(ext)s",
+  overwrite: "never",
+  maxConcurrent: 2,
+  lastMode: "video",
+  embedThumbnail: true,
+  embedChapters: true,
+  embedMetadata: true,
+  writeSubtitles: false,
+  writeAutoSubtitles: false,
+  embedSubtitles: false,
+  subLangs: "en.*,all",
+  subFormat: "best",
+  sponsorblockRemove: "off",
+  sponsorblockMark: "off",
+  rateLimit: "",
+  concurrentFragments: 1,
+  proxy: "",
+  retries: 5,
+  cookiesBrowser: "none",
+  keepVideo: false,
+  customArgs: ""
+};
+async function getSettings() {
+  const stored = await ext.storage.local.get("settings");
+  return { ...DEFAULTS, ...stored?.settings ?? {} };
+}
+async function setSettings(patch) {
+  const next = { ...await getSettings(), ...patch };
+  await ext.storage.local.set({ settings: next });
+  return next;
+}
+var HOSTS = /* @__PURE__ */ new Set(["www.youtube.com", "youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]);
+var VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+function videoUrl(raw) {
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (!HOSTS.has(parsed.hostname.toLowerCase())) return null;
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  let id = null;
+  let shorts = false;
+  if (parsed.hostname === "youtu.be") id = parts[0] ?? null;
+  else if (parts[0] === "shorts" || parts[0] === "live" || parts[0] === "embed") {
+    id = parts[1] ?? null;
+    shorts = parts[0] === "shorts";
+  } else if (parsed.pathname === "/watch") id = parsed.searchParams.get("v");
+  if (!id || !VIDEO_ID.test(id)) return null;
+  return { id, url: `https://www.youtube.com/watch?v=${id}`, shorts };
+}
+function bytes(value, approx = false) {
+  if (!value || !isFinite(value) || value <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = value;
+  let u = 0;
+  while (n >= 1024 && u < units.length - 1) {
+    n /= 1024;
+    u += 1;
+  }
+  return `${approx ? "~" : ""}${n.toFixed(n >= 100 || u === 0 ? 0 : 1)} ${units[u]}`;
+}
+function clock(seconds) {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return "";
+  const t = Math.round(seconds);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor(t % 3600 / 60);
+  const s = String(t % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+}
 
-const WATCH_ANCHORS = [
+// src/formats.ts
+var STEPS = [2160, 1440, 1080, 720, 480, 360];
+function clean(raw, duration) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const f of raw) {
+    if (!f || typeof f.format_id !== "string") continue;
+    const ext2 = String(f.ext ?? "").toLowerCase();
+    const protocol = String(f.protocol ?? "").toLowerCase();
+    if (ext2 === "mhtml" || protocol.startsWith("m3u8") || protocol === "ism" || protocol === "f4m") continue;
+    const video = !!f.vcodec && f.vcodec !== "none";
+    const audio = !!f.acodec && f.acodec !== "none";
+    if (!video && !audio) continue;
+    const tbr = typeof f.tbr === "number" ? f.tbr : 0;
+    const size = f.filesize ?? f.filesize_approx ?? (tbr && duration ? Math.round(tbr * 1e3 * duration / 8) : null);
+    out.push({
+      id: f.format_id,
+      ext: ext2,
+      height: Number(f.height) || 0,
+      fps: Number(f.fps) || 0,
+      video,
+      audio,
+      abr: Number(f.abr) || 0,
+      tbr,
+      size: size ?? null
+    });
+  }
+  return out;
+}
+function bestAudio(formats, container) {
+  const wanted = container === "webm" ? /^webm$/ : container === "mp4" ? /^(m4a|mp4)$/ : /./;
+  const audio = formats.filter((f) => f.audio && !f.video);
+  return audio.sort((a, b) => (wanted.test(b.ext) ? 1e6 : 0) + (b.abr || b.tbr) - ((wanted.test(a.ext) ? 1e6 : 0) + (a.abr || a.tbr)))[0];
+}
+function bestVideo(bucket, container) {
+  const wanted = container === "webm" ? /^webm$/ : /^mp4$/;
+  return bucket.slice().sort((a, b) => score(b) - score(a))[0];
+  function score(f) {
+    return (wanted.test(f.ext) ? 4e3 : 0) + (f.audio ? 300 : 0) + (f.fps >= 50 ? 200 : 0) + f.tbr;
+  }
+}
+function videoChoices(raw, duration, settings) {
+  const formats = clean(raw, duration);
+  const cap = settings.videoQuality === "best" ? Infinity : Number(settings.videoQuality);
+  const videos = formats.filter((f) => f.video && f.height && f.height <= cap);
+  if (!videos.length) return [];
+  const audio = bestAudio(formats, settings.container);
+  const limit = cap === Infinity ? "" : `[height<=${cap}]`;
+  const top = bestVideo(videos.filter((f) => f.height === Math.max(...videos.map((v) => v.height))), settings.container);
+  const choices = [{
+    key: "best",
+    label: "Best available",
+    note: note(top, audio, `${top.height}p`),
+    selector: `bestvideo*${limit}+bestaudio/best${limit}`,
+    needsFfmpeg: !top.audio
+  }];
+  for (const step of STEPS) {
+    if (step > cap) continue;
+    const bucket = videos.filter((f) => f.height === step);
+    if (!bucket.length) continue;
+    const pick = bestVideo(bucket, settings.container);
+    const merge = !pick.audio;
+    if (merge && !audio) continue;
+    const fallback = `bestvideo[height<=${step}]+bestaudio/best[height<=${step}]`;
+    choices.push({
+      key: `p${step}`,
+      label: `${step}p`,
+      note: note(pick, merge ? audio : void 0, ""),
+      selector: merge ? `${pick.id}+${audio.id}/${fallback}` : `${pick.id}/${fallback}`,
+      needsFfmpeg: merge
+    });
+  }
+  return choices;
+  function note(video, mergedAudio, prefix) {
+    const size = video.size == null ? "" : bytes(video.size + (mergedAudio?.size ?? 0), true);
+    return [prefix, video.fps >= 50 ? "60 fps" : "", size].filter(Boolean).join(" \u2022 ");
+  }
+}
+function audioChoices(raw, duration, settings) {
+  const formats = clean(raw, duration).filter((f) => f.audio && !f.video);
+  if (!formats.length) return [];
+  const best = formats.slice().sort((a, b) => (b.abr || b.tbr) - (a.abr || a.tbr))[0];
+  const m4a = formats.filter((f) => /^(m4a|mp4)$/.test(f.ext)).sort((a, b) => b.abr - a.abr)[0];
+  const opus = formats.filter((f) => f.ext === "webm").sort((a, b) => b.abr - a.abr)[0];
+  const choices = [{
+    key: "best",
+    label: "Best available",
+    note: bytes(best.size, true),
+    selector: "bestaudio/best",
+    audioFormat: "best",
+    needsFfmpeg: false
+  }];
+  if (m4a) choices.push({
+    key: "m4a",
+    label: "M4A",
+    note: bytes(m4a.size, true),
+    selector: "bestaudio[ext=m4a]/bestaudio",
+    audioFormat: "m4a",
+    needsFfmpeg: false
+  });
+  choices.push({
+    key: "mp3",
+    label: "MP3",
+    note: `converted from the ${Math.round(best.abr || best.tbr) || "?"} kbps source`,
+    selector: "bestaudio/best",
+    audioFormat: "mp3",
+    needsFfmpeg: true
+  });
+  if (opus) choices.push({
+    key: "opus",
+    label: "Opus",
+    note: bytes(opus.size, true),
+    selector: "bestaudio[acodec^=opus]/bestaudio[ext=webm]/bestaudio",
+    audioFormat: "opus",
+    needsFfmpeg: false
+  });
+  return choices;
+}
+
+// src/content.ts
+var BUTTON_ID = "ytdlp-bridge-btn";
+var HOST_ID = "ytdlp-bridge-ui";
+var WATCH_ANCHORS = [
   "ytd-watch-metadata #top-level-buttons-computed",
   "ytd-watch-metadata ytd-menu-renderer #top-level-buttons-computed",
   "#actions-inner #top-level-buttons-computed",
   "#top-level-buttons-computed",
   "ytd-watch-metadata #actions",
   "#actions.ytd-watch-metadata",
-  "#menu-container #top-level-buttons-computed",
+  "#menu-container #top-level-buttons-computed"
 ];
-const SHORTS_ANCHORS = [
+var SHORTS_ANCHORS = [
   "ytd-reel-video-renderer[is-active] #actions",
   "#shorts-container ytd-reel-video-renderer[is-active] #actions",
   "#shorts-container #actions",
-  "ytd-reel-player-overlay-renderer #actions",
+  "ytd-reel-player-overlay-renderer #actions"
 ];
-
-const boundButtons = new WeakSet<HTMLElement>();
-let observer: MutationObserver | null = null;
-let navTimers: number[] = [];
-let pendingCheck = false;
-let currentId: string | null = null;
-
-// ------------------------------------------------------------------- button
-
-export function anchorFor(shorts: boolean): HTMLElement | null {
+var boundButtons = /* @__PURE__ */ new WeakSet();
+var observer = null;
+var navTimers = [];
+var pendingCheck = false;
+var currentId = null;
+function anchorFor(shorts) {
   for (const selector of shorts ? SHORTS_ANCHORS : WATCH_ANCHORS) {
-    const node = document.querySelector<HTMLElement>(selector);
+    const node = document.querySelector(selector);
     if (node?.isConnected) return node;
   }
   return null;
 }
-
-export function findExistingDownloadButton(container: HTMLElement): HTMLButtonElement | null {
-  // Check ytd-download-button-renderer first
+function findExistingDownloadButton(container) {
   const dlRenderer = container.querySelector("ytd-download-button-renderer button");
   if (dlRenderer && (typeof HTMLButtonElement === "undefined" || dlRenderer instanceof HTMLButtonElement)) {
-    return dlRenderer as HTMLButtonElement;
+    return dlRenderer;
   }
-
-  // Search buttons within the action container
-  const buttons = container.querySelectorAll<HTMLButtonElement>("button");
+  const buttons = container.querySelectorAll("button");
   for (const btn of buttons) {
     if (btn.id === BUTTON_ID) continue;
     const label = (btn.getAttribute("aria-label") || "").toLowerCase();
@@ -62,8 +257,7 @@ export function findExistingDownloadButton(container: HTMLElement): HTMLButtonEl
   }
   return null;
 }
-
-function bindExistingButton(btn: HTMLButtonElement): void {
+function bindExistingButton(btn) {
   if (boundButtons.has(btn)) return;
   boundButtons.add(btn);
   btn.addEventListener("click", (event) => {
@@ -73,8 +267,7 @@ function bindExistingButton(btn: HTMLButtonElement): void {
     void openDialog();
   }, true);
 }
-
-function createShortsSvg(): SVGSVGElement {
+function createShortsSvg() {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("width", "24");
@@ -88,17 +281,14 @@ function createShortsSvg(): SVGSVGElement {
   svg.append(path);
   return svg;
 }
-
-function makeShortsButton(): HTMLButtonElement {
+function makeShortsButton() {
   const button = document.createElement("button");
   button.id = BUTTON_ID;
   button.type = "button";
   button.title = "Download with yt-dlp";
   button.setAttribute("aria-label", "Download with yt-dlp");
   button.append(createShortsSvg());
-  button.style.cssText =
-    "display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:50%;margin-top:16px;padding:0;border:0;cursor:pointer;" +
-    "background:var(--yt-spec-badge-chip-background,rgba(255,255,255,.15));color:var(--yt-spec-text-primary,#fff);";
+  button.style.cssText = "display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:50%;margin-top:16px;padding:0;border:0;cursor:pointer;background:var(--yt-spec-badge-chip-background,rgba(255,255,255,.15));color:var(--yt-spec-text-primary,#fff);";
   button.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -106,18 +296,14 @@ function makeShortsButton(): HTMLButtonElement {
   });
   return button;
 }
-
-function makeFallbackWatchButton(): HTMLButtonElement {
+function makeFallbackWatchButton() {
   const button = document.createElement("button");
   button.id = BUTTON_ID;
   button.type = "button";
   button.title = "Download with yt-dlp";
   button.setAttribute("aria-label", "Download with yt-dlp");
   button.textContent = "Download";
-  button.style.cssText =
-    "display:inline-flex;align-items:center;height:36px;padding:0 14px;margin-left:8px;border:0;cursor:pointer;" +
-    "border-radius:18px;font:500 14px/36px Roboto,'Segoe UI',system-ui,sans-serif;" +
-    "background:var(--yt-spec-badge-chip-background,rgba(128,128,128,.18));color:var(--yt-spec-text-primary,inherit);";
+  button.style.cssText = "display:inline-flex;align-items:center;height:36px;padding:0 14px;margin-left:8px;border:0;cursor:pointer;border-radius:18px;font:500 14px/36px Roboto,'Segoe UI',system-ui,sans-serif;background:var(--yt-spec-badge-chip-background,rgba(128,128,128,.18));color:var(--yt-spec-text-primary,inherit);";
   button.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -125,43 +311,33 @@ function makeFallbackWatchButton(): HTMLButtonElement {
   });
   return button;
 }
-
-export function bindOrPlace(): boolean {
+function bindOrPlace() {
   const target = videoUrl(location.href);
   const existingCustom = document.getElementById(BUTTON_ID);
   if (!target) {
     existingCustom?.remove();
     return true;
   }
-
   const anchor = anchorFor(target.shorts);
   if (!anchor) return false;
-
   if (target.shorts) {
-    // Shorts: use custom styled circular button in active reel
     if (existingCustom?.parentElement === anchor) return true;
     existingCustom?.remove();
     anchor.append(makeShortsButton());
     return true;
   }
-
-  // Normal watch page: first check if YouTube has its own native Download button
   const nativeBtn = findExistingDownloadButton(anchor);
   if (nativeBtn) {
-    // Existing native button found: remove custom button if any, and hook native button
     existingCustom?.remove();
     bindExistingButton(nativeBtn);
     return true;
   }
-
-  // Fallback: YouTube does not show a native download button for this video/user
   if (existingCustom?.parentElement === anchor) return true;
   existingCustom?.remove();
   anchor.append(makeFallbackWatchButton());
   return true;
 }
-
-function scheduleCheck(): void {
+function scheduleCheck() {
   if (pendingCheck) return;
   pendingCheck = true;
   requestAnimationFrame(() => {
@@ -169,8 +345,7 @@ function scheduleCheck(): void {
     bindOrPlace();
   });
 }
-
-function startObserver(): void {
+function startObserver() {
   if (observer) return;
   observer = new MutationObserver(() => {
     scheduleCheck();
@@ -180,27 +355,22 @@ function startObserver(): void {
     observer.observe(targetNode, { childList: true, subtree: true });
   }
 }
-
-function clearNavTimers(): void {
+function clearNavTimers() {
   for (const t of navTimers) clearTimeout(t);
   navTimers = [];
 }
-
-function ensureButton(): void {
+function ensureButton() {
   startObserver();
   bindOrPlace();
-
   clearNavTimers();
-  // Multi-stage polling during YouTube SPA transition as Polymer hydrates and replaces DOM nodes
-  const delays = [100, 250, 500, 900, 1500, 2500, 4000];
+  const delays = [100, 250, 500, 900, 1500, 2500, 4e3];
   for (const delay of delays) {
     navTimers.push(window.setTimeout(() => {
       bindOrPlace();
     }, delay));
   }
 }
-
-function onNavigate(): void {
+function onNavigate() {
   const target = videoUrl(location.href);
   if (target?.id !== currentId) {
     currentId = target?.id ?? null;
@@ -208,10 +378,7 @@ function onNavigate(): void {
   }
   ensureButton();
 }
-
-// ------------------------------------------------------------------- dialog
-
-const CSS = `
+var CSS = `
 :host { all: initial; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 .back { position: fixed; inset: 0; z-index: 2147483000; display: flex; align-items: center; justify-content: center;
   background: rgba(0,0,0,.65); backdrop-filter: blur(5px); padding: 20px; font: 14px/1.45 inherit; }
@@ -256,82 +423,70 @@ const CSS = `
 input.dir { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.05); color: inherit; font: inherit; font-size: 13px; box-sizing: border-box; }
 button:focus-visible, input:focus-visible, .list:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 `;
-
-let root: ShadowRoot | null = null;
-let state: {
-  info?: VideoInfo; deps?: Deps; settings?: Settings; mode?: "video" | "audio";
-  choices?: Choice[]; pick?: Choice; jobId?: string; awaitingJob?: boolean; dir?: string;
-} = {};
-
-function getOrCreateCard(title: string): { body: HTMLElement; foot: HTMLElement } {
-  let back = root!.querySelector<HTMLElement>(".back");
+var root = null;
+var state = {};
+function getOrCreateCard(title) {
+  let back = root.querySelector(".back");
   if (!back) {
     back = document.createElement("div");
     back.className = "back";
-    back.addEventListener("mousedown", (e) => { if (e.target === back) closeDialog(); });
-
+    back.addEventListener("mousedown", (e) => {
+      if (e.target === back) closeDialog();
+    });
     const card = document.createElement("div");
     card.className = "card";
     card.setAttribute("role", "dialog");
     card.setAttribute("aria-modal", "true");
     card.setAttribute("aria-label", title);
-
     const head = document.createElement("div");
     head.className = "head";
-
     const h2 = document.createElement("h2");
     h2.id = "card-title";
     h2.textContent = title;
-
     const closeBtn = document.createElement("button");
     closeBtn.className = "x";
     closeBtn.setAttribute("aria-label", "Close");
-    closeBtn.textContent = "×";
+    closeBtn.textContent = "\xD7";
     closeBtn.addEventListener("click", closeDialog);
-
     head.append(h2, closeBtn);
-
-    const body = document.createElement("div");
-    body.className = "body";
-    body.id = "card-body";
-
-    const foot = document.createElement("div");
-    foot.className = "foot";
-    foot.id = "card-foot";
-
-    card.append(head, body, foot);
+    const body2 = document.createElement("div");
+    body2.className = "body";
+    body2.id = "card-body";
+    const foot2 = document.createElement("div");
+    foot2.className = "foot";
+    foot2.id = "card-foot";
+    card.append(head, body2, foot2);
     back.append(card);
-    root!.append(back);
+    root.append(back);
     closeBtn.focus();
   } else {
-    const headTitle = back.querySelector<HTMLElement>("#card-title");
+    const headTitle = back.querySelector("#card-title");
     if (headTitle) headTitle.textContent = title;
-    const cardEl = back.querySelector<HTMLElement>(".card");
+    const cardEl = back.querySelector(".card");
     if (cardEl) cardEl.setAttribute("aria-label", title);
   }
-  const body = back.querySelector("#card-body") as HTMLElement;
-  const foot = back.querySelector("#card-foot") as HTMLElement;
+  const body = back.querySelector("#card-body");
+  const foot = back.querySelector("#card-foot");
   body.replaceChildren();
   foot.replaceChildren();
   return { body, foot };
 }
-
-function onKey(event: KeyboardEvent): void {
-  if (event.key === "Escape" && root) { event.preventDefault(); closeDialog(); }
+function onKey(event) {
+  if (event.key === "Escape" && root) {
+    event.preventDefault();
+    closeDialog();
+  }
 }
-
-export function closeDialog(): void {
+function closeDialog() {
   document.getElementById(HOST_ID)?.remove();
   document.removeEventListener("keydown", onKey, true);
   root = null;
   state = {};
 }
-
-async function openDialog(): Promise<void> {
+async function openDialog() {
   const target = videoUrl(location.href);
   if (!target) return;
   closeDialog();
-
   const host = document.createElement("div");
   host.id = HOST_ID;
   root = host.attachShadow({ mode: "closed" });
@@ -340,11 +495,8 @@ async function openDialog(): Promise<void> {
   root.append(style);
   document.body.append(host);
   document.addEventListener("keydown", onKey, true);
-
-  // Check if there is already an active job for this video
-  const activeReply = await send<Job | null>({ type: "jobForUrl", url: target.url });
+  const activeReply = await send({ type: "jobForUrl", url: target.url });
   if (!root) return;
-
   if (activeReply.ok && activeReply.data) {
     const existing = activeReply.data;
     if (existing.state === "queued" || existing.state === "downloading" || existing.state === "processing") {
@@ -358,16 +510,14 @@ async function openDialog(): Promise<void> {
       return;
     }
   }
-
   const { body } = getOrCreateCard("Download");
   const loadingP = document.createElement("p");
   loadingP.className = "sub";
-  loadingP.textContent = "Reading available qualities…";
+  loadingP.textContent = "Reading available qualities\u2026";
   body.append(loadingP);
-
   const [depsReply, infoReply] = await Promise.all([
-    send<Deps>({ type: "deps" }),
-    send<VideoInfo>({ type: "info", url: target.url }),
+    send({ type: "deps" }),
+    send({ type: "info", url: target.url })
   ]);
   if (!root) return;
   if (!depsReply.ok) return showError(depsReply.error);
@@ -381,105 +531,89 @@ async function openDialog(): Promise<void> {
   state.dir = state.settings.downloadDirectory;
   showModes();
 }
-
-function createHeader(i: VideoInfo): HTMLElement {
+function createHeader(i) {
   const wrap = document.createElement("div");
   wrap.className = "video";
-
   const img = document.createElement("img");
   img.alt = "";
   if (i.thumbnail) {
     const src = safeUrl(i.thumbnail);
     if (src) img.src = src;
   }
-
   const meta = document.createElement("div");
   const titleP = document.createElement("p");
   titleP.className = "t";
   titleP.textContent = i.title;
-
   const subP = document.createElement("p");
   subP.className = "sub";
-  subP.textContent = [i.uploader, clock(i.duration), i.isLive ? "Live" : ""].filter(Boolean).join(" • ");
-
+  subP.textContent = [i.uploader, clock(i.duration), i.isLive ? "Live" : ""].filter(Boolean).join(" \u2022 ");
   meta.append(titleP, subP);
   wrap.append(img, meta);
   return wrap;
 }
-
-function safeUrl(value: string): string {
-  try { const u = new URL(value); return u.protocol === "https:" ? u.toString() : ""; } catch { return ""; }
+function safeUrl(value) {
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" ? u.toString() : "";
+  } catch {
+    return "";
+  }
 }
-
-function showModes(): void {
+function showModes() {
   const { body } = getOrCreateCard("Download");
-  body.append(createHeader(state.info!));
-
+  body.append(createHeader(state.info));
   const label = document.createElement("p");
   label.className = "label";
   label.textContent = "Download as";
-
   const pair = document.createElement("div");
   pair.className = "pair";
-
   const videoBtn = document.createElement("button");
   videoBtn.className = "big";
   videoBtn.dataset.m = "video";
   videoBtn.textContent = "Video";
   videoBtn.addEventListener("click", () => showChoices("video"));
-
   const audioBtn = document.createElement("button");
   audioBtn.className = "big";
   audioBtn.dataset.m = "audio";
   audioBtn.textContent = "Music";
   audioBtn.addEventListener("click", () => showChoices("audio"));
-
   pair.append(videoBtn, audioBtn);
   body.append(label, pair);
 }
-
-function selectChoice(choice: Choice): void {
+function selectChoice(choice) {
   state.pick = choice;
   if (!root) return;
-  const options = root.querySelectorAll<HTMLButtonElement>(".opt");
+  const options = root.querySelectorAll(".opt");
   options.forEach((btn) => {
     const isChosen = btn.getAttribute("data-key") === choice.key;
     btn.setAttribute("aria-checked", String(isChosen));
   });
   const missing = choice.needsFfmpeg && !state.deps?.ffmpeg.found;
-  const goBtn = root.querySelector<HTMLButtonElement>("#btn-download");
-  const missingNote = root.querySelector<HTMLElement>("#missing-note");
+  const goBtn = root.querySelector("#btn-download");
+  const missingNote = root.querySelector("#missing-note");
   if (goBtn) goBtn.disabled = Boolean(missing);
   if (missingNote) missingNote.textContent = missing ? "FFmpeg is required for this choice." : "";
 }
-
-function onListKeyDown(e: KeyboardEvent): void {
+function onListKeyDown(e) {
   if (!state.choices || !state.choices.length) return;
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
     const currIndex = state.choices.findIndex((c) => c.key === state.pick?.key);
-    const nextIndex = e.key === "ArrowDown"
-      ? (currIndex + 1) % state.choices.length
-      : (currIndex - 1 + state.choices.length) % state.choices.length;
+    const nextIndex = e.key === "ArrowDown" ? (currIndex + 1) % state.choices.length : (currIndex - 1 + state.choices.length) % state.choices.length;
     const next = state.choices[nextIndex];
     selectChoice(next);
-    const nextBtn = root?.querySelector<HTMLButtonElement>(`.opt[data-key="${next.key}"]`);
+    const nextBtn = root?.querySelector(`.opt[data-key="${next.key}"]`);
     nextBtn?.focus();
   }
 }
-
-function showChoices(mode: "video" | "audio"): void {
-  const settings = state.settings!;
+function showChoices(mode) {
+  const settings = state.settings;
   state.mode = mode;
   void setSettings({ lastMode: mode });
-  const info = state.info!;
-  state.choices = mode === "video"
-    ? videoChoices(info.formats, info.duration ?? null, settings)
-    : audioChoices(info.formats, info.duration ?? null, settings);
+  const info = state.info;
+  state.choices = mode === "video" ? videoChoices(info.formats, info.duration ?? null, settings) : audioChoices(info.formats, info.duration ?? null, settings);
   state.pick = state.choices.find((c) => c.key === (mode === "audio" ? settings.audioFormat : "best")) ?? state.choices[0];
-
   const { body, foot } = getOrCreateCard(mode === "video" ? "Video" : "Music");
-
   if (!state.choices.length) {
     const sub = document.createElement("p");
     sub.className = "sub";
@@ -487,20 +621,16 @@ function showChoices(mode: "video" | "audio"): void {
     body.append(sub);
     return;
   }
-
   const missing = Boolean(state.pick?.needsFfmpeg && !state.deps?.ffmpeg.found);
-
   const label = document.createElement("p");
   label.className = "label";
   label.id = "pick-label";
   label.textContent = mode === "video" ? "Quality" : "Format";
-
   const list = document.createElement("div");
   list.className = "list";
   list.setAttribute("role", "radiogroup");
   list.setAttribute("aria-labelledby", "pick-label");
   list.tabIndex = 0;
-
   for (const choice of state.choices) {
     const option = document.createElement("button");
     option.className = "opt";
@@ -508,15 +638,12 @@ function showChoices(mode: "video" | "audio"): void {
     option.setAttribute("role", "radio");
     option.setAttribute("data-key", choice.key);
     option.setAttribute("aria-checked", String(choice.key === state.pick?.key));
-
     const nameSpan = document.createElement("span");
     nameSpan.className = "name";
     nameSpan.textContent = choice.label;
-
     const noteSpan = document.createElement("span");
     noteSpan.className = "note";
     noteSpan.textContent = choice.note;
-
     option.append(nameSpan, noteSpan);
     option.addEventListener("click", (e) => {
       e.preventDefault();
@@ -524,23 +651,19 @@ function showChoices(mode: "video" | "audio"): void {
     });
     list.append(option);
   }
-  list.addEventListener("keydown", (e: Event) => onListKeyDown(e as KeyboardEvent));
-
+  list.addEventListener("keydown", (e) => onListKeyDown(e));
   body.append(label, list);
-
   if (mode === "video") {
     const noteP = document.createElement("p");
     noteP.className = "note";
     noteP.textContent = `Saved as ${settings.container.toUpperCase()}`;
     body.append(noteP);
   }
-
   if (settings.askWhereToSave) {
     const dirLabel = document.createElement("label");
     dirLabel.className = "label";
     dirLabel.htmlFor = "dir";
     dirLabel.textContent = "Save to";
-
     const dirInput = document.createElement("input");
     dirInput.className = "dir";
     dirInput.id = "dir";
@@ -548,42 +671,35 @@ function showChoices(mode: "video" | "audio"): void {
     dirInput.placeholder = "Downloads folder";
     dirInput.value = state.dir ?? "";
     dirInput.addEventListener("input", (e) => {
-      state.dir = (e.target as HTMLInputElement).value.trim();
+      state.dir = e.target.value.trim();
     });
-
     body.append(dirLabel, dirInput);
   }
-
   const missingSpan = document.createElement("span");
   missingSpan.className = "note";
   missingSpan.id = "missing-note";
   missingSpan.textContent = missing ? "FFmpeg is required for this choice." : "";
-
   const btnSpan = document.createElement("span");
   const backBtn = document.createElement("button");
   backBtn.className = "ghost";
   backBtn.setAttribute("data-back", "");
   backBtn.textContent = "Back";
   backBtn.addEventListener("click", showModes);
-
   const dlBtn = document.createElement("button");
   dlBtn.className = "go";
   dlBtn.id = "btn-download";
   dlBtn.disabled = missing;
   dlBtn.textContent = "Download";
   dlBtn.addEventListener("click", () => void startDownload());
-
   btnSpan.append(backBtn, document.createTextNode(" "), dlBtn);
   foot.append(missingSpan, btnSpan);
 }
-
-async function startDownload(): Promise<void> {
+async function startDownload() {
   const { pick, info, mode } = state;
   if (!pick || !info) return;
-
   state.awaitingJob = true;
   showProgress({ id: "", state: "queued", title: info.title, label: pick.label, percent: 0, stage: "Starting" });
-  const reply = await send<Job>({
+  const reply = await send({
     type: "download",
     url: location.href,
     mode,
@@ -591,7 +707,7 @@ async function startDownload(): Promise<void> {
     audioFormat: pick.audioFormat,
     outputDirectory: state.dir || "",
     title: info.title,
-    label: pick.label,
+    label: pick.label
   });
   if (!reply.ok) {
     state.awaitingJob = false;
@@ -600,60 +716,47 @@ async function startDownload(): Promise<void> {
   state.jobId = reply.data.id;
   state.awaitingJob = false;
 }
-
-function formatProgressLine(job: Job): string {
+function formatProgressLine(job) {
   return [
     job.totalBytes ? `${bytes(job.downloadedBytes)} / ${bytes(job.totalBytes)}` : bytes(job.downloadedBytes),
     job.speed ? `${bytes(job.speed)}/s` : "",
-    job.eta ? `${clock(job.eta)} left` : "",
-  ].filter(Boolean).join(" • ");
+    job.eta ? `${clock(job.eta)} left` : ""
+  ].filter(Boolean).join(" \u2022 ");
 }
-
-function showProgress(job: Job): void {
+function showProgress(job) {
   const percent = Math.max(0, Math.min(100, job.percent ?? 0));
   const line = formatProgressLine(job);
-
   const { body, foot } = getOrCreateCard(job.stage ?? "Downloading");
-
   const titleP = document.createElement("p");
   titleP.className = "t";
   titleP.textContent = job.title;
-
   const subP = document.createElement("p");
   subP.className = "sub";
   subP.textContent = job.label;
-
   const barWrap = document.createElement("div");
   barWrap.className = "bar";
   barWrap.setAttribute("role", "progressbar");
   barWrap.setAttribute("aria-valuemin", "0");
   barWrap.setAttribute("aria-valuemax", "100");
   barWrap.setAttribute("aria-valuenow", percent.toFixed(0));
-
   const barI = document.createElement("i");
   barI.id = "prog-bar";
   barI.style.width = `${percent.toFixed(1)}%`;
   barWrap.append(barI);
-
   const noteP = document.createElement("p");
   noteP.className = "note";
   noteP.id = "prog-text";
   noteP.setAttribute("aria-live", "polite");
-  noteP.textContent = `${percent.toFixed(0)}% ${line ? "• " + line : ""}`;
-
+  noteP.textContent = `${percent.toFixed(0)}% ${line ? "\u2022 " + line : ""}`;
   body.append(titleP, subP, barWrap, noteP);
-
   const footSpan1 = document.createElement("span");
   footSpan1.className = "note";
-
   const footSpan2 = document.createElement("span");
-
   const hideBtn = document.createElement("button");
   hideBtn.className = "ghost";
   hideBtn.setAttribute("data-hide", "");
   hideBtn.textContent = "Hide";
   hideBtn.addEventListener("click", closeDialog);
-
   const cancelBtn = document.createElement("button");
   cancelBtn.className = "go";
   cancelBtn.setAttribute("data-cancel", "");
@@ -661,17 +764,15 @@ function showProgress(job: Job): void {
   cancelBtn.addEventListener("click", () => {
     if (state.jobId) void send({ type: "cancel", jobId: state.jobId });
   });
-
   footSpan2.append(hideBtn, document.createTextNode(" "), cancelBtn);
   foot.append(footSpan1, footSpan2);
 }
-
-function updateProgress(job: Job): void {
+function updateProgress(job) {
   if (!root) return;
-  const bar = root.querySelector<HTMLElement>("#prog-bar");
-  const barContainer = root.querySelector<HTMLElement>(".bar");
-  const text = root.querySelector<HTMLElement>("#prog-text");
-  const title = root.querySelector<HTMLElement>("#card-title");
+  const bar = root.querySelector("#prog-bar");
+  const barContainer = root.querySelector(".bar");
+  const text = root.querySelector("#prog-text");
+  const title = root.querySelector("#card-title");
   if (!bar || !text) {
     showProgress(job);
     return;
@@ -681,85 +782,65 @@ function updateProgress(job: Job): void {
   bar.style.width = `${percent.toFixed(1)}%`;
   barContainer?.setAttribute("aria-valuenow", percent.toFixed(0));
   const line = formatProgressLine(job);
-  text.textContent = `${percent.toFixed(0)}% ${line ? "• " + line : ""}`;
+  text.textContent = `${percent.toFixed(0)}% ${line ? "\u2022 " + line : ""}`;
 }
-
-function showDone(job: Job): void {
+function showDone(job) {
   const filename = job.filepath?.split(/[\\/]/).pop() ?? job.title;
-
   const { body, foot } = getOrCreateCard("Download completed");
-
   const titleP = document.createElement("p");
   titleP.className = "t";
   titleP.textContent = filename;
-
   const subP = document.createElement("p");
   subP.className = "sub";
   subP.textContent = "Download completed.";
-
   body.append(titleP, subP);
-
   const footSpan1 = document.createElement("span");
   const footSpan2 = document.createElement("span");
-
   const locBtn = document.createElement("button");
   locBtn.className = "ghost";
   locBtn.setAttribute("data-location", "");
   locBtn.textContent = "Show file location";
-  locBtn.addEventListener("click", () =>
-    void send({ type: "openFolder", jobId: job.id, path: job.filepath ?? "" }));
-
+  locBtn.addEventListener("click", () => void send({ type: "openFolder", jobId: job.id, path: job.filepath ?? "" }));
   const openBtn = document.createElement("button");
   openBtn.className = "go";
   openBtn.setAttribute("data-open", "");
   openBtn.textContent = "Open";
-  openBtn.addEventListener("click", () =>
-    void send({ type: "openFile", jobId: job.id, path: job.filepath ?? "" }));
-
+  openBtn.addEventListener("click", () => void send({ type: "openFile", jobId: job.id, path: job.filepath ?? "" }));
   footSpan2.append(locBtn, document.createTextNode(" "), openBtn);
   foot.append(footSpan1, footSpan2);
 }
-
-const FRIENDLY: Record<string, { title: string; text: string; action?: string }> = {
+var FRIENDLY = {
   NO_HELPER: { title: "Setup required", text: "The local helper is not installed.", action: "Set up" },
   NO_YTDLP: { title: "yt-dlp is not installed", text: "Install yt-dlp, then test the setup in settings.", action: "Set up yt-dlp" },
   FFMPEG_MISSING: { title: "FFmpeg is required", text: "Try M4A or a quality that already includes audio.", action: "Settings" },
   VIDEO_UNAVAILABLE: { title: "Video unavailable", text: "YouTube will not serve this video." },
   AUTH_REQUIRED: { title: "Sign-in required", text: "This video is private, members-only or age-restricted." },
   FORMAT_UNAVAILABLE: { title: "Quality not available", text: "Reopen the dialog to reload the list." },
-  NETWORK_ERROR: { title: "Network problem", text: "The connection dropped during the download." },
+  NETWORK_ERROR: { title: "Network problem", text: "The connection dropped during the download." }
 };
-
-function showError(error: { code: string; message: string; detail?: string }): void {
+function showError(error) {
   const friendly = FRIENDLY[error.code] ?? { title: "Download failed", text: error.message };
-
   const { body, foot } = getOrCreateCard(friendly.title);
-
   const subP = document.createElement("p");
   subP.className = "sub";
   subP.textContent = friendly.text;
   body.append(subP);
-
   if (error.detail) {
     const detBtn = document.createElement("button");
     detBtn.className = "ghost";
     detBtn.setAttribute("data-det", "");
     detBtn.textContent = "Details";
-
     const detBox = document.createElement("div");
     detBox.className = "det";
     detBox.hidden = true;
     detBox.textContent = error.detail;
-
     detBtn.addEventListener("click", () => {
       detBox.hidden = !detBox.hidden;
     });
     body.append(detBtn, detBox);
   }
-
   const footSpan1 = document.createElement("span");
   const footSpan2 = document.createElement("span");
-
   if (friendly.action) {
     const actBtn = document.createElement("button");
     actBtn.className = "ghost";
@@ -771,40 +852,34 @@ function showError(error: { code: string; message: string; detail?: string }): v
     });
     footSpan2.append(actBtn, document.createTextNode(" "));
   }
-
   const closeBtn = document.createElement("button");
   closeBtn.className = "go";
   closeBtn.setAttribute("data-close", "");
   closeBtn.textContent = "Close";
   closeBtn.addEventListener("click", closeDialog);
-
   footSpan2.append(closeBtn);
   foot.append(footSpan1, footSpan2);
 }
-
-// ------------------------------------------------------------------- wiring
-
 if (typeof ext !== "undefined" && ext?.runtime?.onMessage) {
-  ext.runtime.onMessage.addListener((message: any) => {
-    if (message?.type !== "job" || !root) return undefined;
-    const job: Job = message.job;
-    if (state.jobId === undefined && state.awaitingJob) state.jobId = job.id;
-    if (job.id !== state.jobId) return undefined;
+  ext.runtime.onMessage.addListener((message) => {
+    if (message?.type !== "job" || !root) return void 0;
+    const job = message.job;
+    if (state.jobId === void 0 && state.awaitingJob) state.jobId = job.id;
+    if (job.id !== state.jobId) return void 0;
     if (job.state === "completed") showDone(job);
     else if (job.state === "failed") showError(job.error ?? { code: "FAILED", message: "The download failed." });
     else if (job.state === "cancelled") closeDialog();
     else updateProgress(job);
-    return undefined;
+    return void 0;
   });
 }
-
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   window.addEventListener("yt-navigate-start", onNavigate, true);
   window.addEventListener("yt-navigate-finish", onNavigate, true);
   window.addEventListener("yt-page-data-updated", onNavigate, true);
   window.addEventListener("yt-visibility-refresh", onNavigate, true);
   window.addEventListener("popstate", onNavigate, true);
-  window.addEventListener("yt-action", (e: any) => {
+  window.addEventListener("yt-action", (e) => {
     const actionName = e?.detail?.actionName;
     if (actionName && (String(actionName).includes("reel") || String(actionName).includes("navigate"))) {
       onNavigate();
@@ -814,3 +889,136 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   onNavigate();
 }
 
+// src/test/button_and_state.test.ts
+var MockButton = class {
+  id;
+  textContent;
+  attrs;
+  constructor(opts = {}) {
+    this.id = opts.id || "";
+    this.textContent = opts.text || "";
+    this.attrs = /* @__PURE__ */ new Map();
+    if (opts.ariaLabel) this.attrs.set("aria-label", opts.ariaLabel);
+    if (opts.title) this.attrs.set("title", opts.title);
+  }
+  getAttribute(name) {
+    return this.attrs.get(name) ?? null;
+  }
+};
+var MockContainer = class {
+  buttons = [];
+  dlRendererButton = null;
+  querySelector(selector) {
+    if (selector.includes("ytd-download-button-renderer")) {
+      return this.dlRendererButton;
+    }
+    return null;
+  }
+  querySelectorAll(selector) {
+    if (selector === "button") {
+      return this.buttons;
+    }
+    return [];
+  }
+};
+test("findExistingDownloadButton finds ytd-download-button-renderer button", () => {
+  const container = new MockContainer();
+  const dlBtn = new MockButton({ ariaLabel: "Download video" });
+  container.dlRendererButton = dlBtn;
+  Object.setPrototypeOf(dlBtn, globalThis.HTMLButtonElement?.prototype || Object.prototype);
+  const found = container.querySelector("ytd-download-button-renderer button");
+  assert.equal(found, dlBtn);
+});
+test("findExistingDownloadButton identifies existing native button by aria-label or title", () => {
+  const container = new MockContainer();
+  const likeBtn = new MockButton({ ariaLabel: "Like this video along with 10k others" });
+  const shareBtn = new MockButton({ ariaLabel: "Share" });
+  const downloadBtn = new MockButton({ ariaLabel: "Download" });
+  container.buttons = [likeBtn, shareBtn, downloadBtn];
+  const found = findExistingDownloadButton(container);
+  assert.equal(found, downloadBtn);
+});
+test("findExistingDownloadButton ignores custom extension button and other buttons", () => {
+  const container = new MockContainer();
+  const customBtn = new MockButton({ id: BUTTON_ID, text: "Download" });
+  const shareBtn = new MockButton({ ariaLabel: "Share", text: "Share" });
+  container.buttons = [customBtn, shareBtn];
+  const found = findExistingDownloadButton(container);
+  assert.equal(found, null);
+});
+test("findExistingDownloadButton matches title attribute as fallback", () => {
+  const container = new MockContainer();
+  const titleDlBtn = new MockButton({ title: "Download offline" });
+  container.buttons = [titleDlBtn];
+  const found = findExistingDownloadButton(container);
+  assert.equal(found, titleDlBtn);
+});
+test("in-flight metadata deduplication shares single promise for concurrent requests", async () => {
+  const inFlight = /* @__PURE__ */ new Map();
+  let callCount = 0;
+  async function mockFetchInfo(id) {
+    const existing = inFlight.get(id);
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        callCount++;
+        await new Promise((r) => setTimeout(r, 10));
+        return { id, title: "Test Video", webpageUrl: `https://www.youtube.com/watch?v=${id}`, formats: [] };
+      } finally {
+        inFlight.delete(id);
+      }
+    })();
+    inFlight.set(id, promise);
+    return promise;
+  }
+  const [res1, res2, res3] = await Promise.all([
+    mockFetchInfo("test1234567"),
+    mockFetchInfo("test1234567"),
+    mockFetchInfo("test1234567")
+  ]);
+  assert.equal(callCount, 1);
+  assert.equal(res1.title, "Test Video");
+  assert.equal(res2.title, "Test Video");
+  assert.equal(res3.title, "Test Video");
+});
+test("bounded job history prunes oldest completed jobs beyond limit", () => {
+  const jobs = /* @__PURE__ */ new Map();
+  const limit = 5;
+  function prune() {
+    if (jobs.size <= limit) return;
+    for (const [id, job] of jobs) {
+      if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+        jobs.delete(id);
+        if (jobs.size <= limit) break;
+      }
+    }
+  }
+  for (let i = 1; i <= 8; i++) {
+    jobs.set(`job-${i}`, {
+      id: `job-${i}`,
+      state: "completed",
+      title: `Job ${i}`,
+      label: "1080p",
+      percent: 100
+    });
+    prune();
+  }
+  assert.equal(jobs.size, limit);
+  assert.ok(!jobs.has("job-1"));
+  assert.ok(!jobs.has("job-2"));
+  assert.ok(!jobs.has("job-3"));
+  assert.ok(jobs.has("job-8"));
+});
+test("videoUrl properly handles normal videos, shorts, and drops playlist parameters", () => {
+  const normal = videoUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123456&index=2");
+  assert.ok(normal);
+  assert.equal(normal.id, "dQw4w9WgXcQ");
+  assert.equal(normal.url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(normal.shorts, false);
+  const short = videoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ");
+  assert.ok(short);
+  assert.equal(short.id, "dQw4w9WgXcQ");
+  assert.equal(short.shorts, true);
+  const channel = videoUrl("https://www.youtube.com/@YouTube");
+  assert.equal(channel, null);
+});

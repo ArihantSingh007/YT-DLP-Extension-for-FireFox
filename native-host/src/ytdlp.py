@@ -41,6 +41,16 @@ def config_dir() -> str:
 
 
 def downloads_dir() -> str:
+    if IS_WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+                val, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
+                candidate = os.path.expandvars(str(val))
+                if os.path.isdir(candidate):
+                    return candidate
+        except OSError:
+            pass
     candidate = os.path.join(os.path.expanduser("~"), "Downloads")
     return candidate if os.path.isdir(candidate) else os.path.expanduser("~")
 
@@ -89,32 +99,86 @@ def version_of(executable: str, flag: str = "--version") -> str:
     return first.split(" ", 2)[2].split(" ")[0] if first.lower().startswith("ffmpeg version ") else first
 
 
-def info_args(ytdlp: str, url: str):
-    return [ytdlp, "--dump-single-json", "--no-playlist", "--no-warnings", "--no-progress",
-            "--no-colors", "--ignore-config", "--socket-timeout", "20", "--retries", "3", "--", url]
+def info_args(ytdlp: str, url: str, cookies_browser: str = ""):
+    args = [ytdlp, "--dump-single-json", "--no-playlist", "--no-warnings", "--no-progress",
+            "--no-colors", "--ignore-config", "--socket-timeout", "20", "--retries", "3"]
+    if cookies_browser and cookies_browser != "none":
+        args += ["--cookies-from-browser", cookies_browser]
+    return args + ["--", url]
 
 
 def download_args(job: dict, ytdlp: str, ffmpeg: str):
+    retries = str(job.get("retries") or 5)
     args = [ytdlp, "--ignore-config", "--no-colors", "--newline", "--no-warnings", "--no-playlist",
-            "--socket-timeout", "20", "--retries", "5", "--fragment-retries", "10", "--trim-filenames", "200",
+            "--socket-timeout", "20", "--retries", retries, "--fragment-retries", "10", "--trim-filenames", "200",
             "--progress-template", PROGRESS_TEMPLATE, "--progress-template", POST_TEMPLATE,
             "--print", PRINT_TEMPLATE, "--no-simulate",
-            "--paths", job["dir"], "-o", job["template"], "--embed-metadata"]
+            "--paths", job["dir"], "-o", job["template"]]
     if IS_WINDOWS:
         args.append("--windows-filenames")
     # Unicode titles are kept; only characters the filesystem rejects are
     # stripped, and very long names are trimmed rather than failing.
-    args.append("--force-overwrites" if job["overwrite"] == "overwrite" else "--no-overwrites")
+    args.append("--force-overwrites" if job.get("overwrite") == "overwrite" else "--no-overwrites")
     if ffmpeg:
         args += ["--ffmpeg-location", ffmpeg]
+
+    # Media & Metadata Embedding
+    if job.get("embedMetadata", True):
+        args.append("--embed-metadata")
+    if job.get("embedThumbnail"):
+        args.append("--embed-thumbnail")
+    if job.get("embedChapters", True):
+        args.append("--embed-chapters")
+
+    # Subtitles & Captions
+    if job.get("writeSubtitles"):
+        args.append("--write-subs")
+    if job.get("writeAutoSubtitles"):
+        args.append("--write-auto-subs")
+    if job.get("embedSubtitles"):
+        args.append("--embed-subs")
+    if job.get("subLangs"):
+        args += ["--sub-langs", job["subLangs"]]
+    if job.get("subFormat") and job["subFormat"] != "best":
+        args += ["--convert-subs", job["subFormat"]]
+
+    # SponsorBlock
+    sb_remove = job.get("sponsorblockRemove")
+    if sb_remove and sb_remove != "off":
+        args += ["--sponsorblock-remove", sb_remove]
+    sb_mark = job.get("sponsorblockMark")
+    if sb_mark and sb_mark != "off":
+        args += ["--sponsorblock-mark", sb_mark]
+
+    # Network & Performance
+    if job.get("rateLimit"):
+        args += ["--limit-rate", job["rateLimit"]]
+    if job.get("concurrentFragments") and int(job.get("concurrentFragments") or 1) > 1:
+        args += ["--concurrent-fragments", str(job["concurrentFragments"])]
+    if job.get("proxy"):
+        args += ["--proxy", job["proxy"]]
+
+    # Authentication & Cookies
+    cookies = job.get("cookiesBrowser")
+    if cookies and cookies != "none":
+        args += ["--cookies-from-browser", cookies]
+
+    # Mode / format
     if job["mode"] == "audio":
         args += ["-f", job["format"], "-x", "--audio-format", job["audioFormat"]]
         if job["audioFormat"] != "best":
-            args += ["--audio-quality", "0" if job["audioQuality"] == "best" else job["audioQuality"] + "K"]
+            args += ["--audio-quality", "0" if job["audioQuality"] == "best" else str(job["audioQuality"]) + "K"]
+        if job.get("keepVideo"):
+            args.append("--keep-video")
     else:
         args += ["-f", job["format"]]
         if job.get("container"):
             args += ["--merge-output-format", job["container"]]
+
+    # Extra arguments (already sanitized by validate.custom_args)
+    if job.get("customArgs"):
+        args += job["customArgs"]
+
     return args + ["--", job["url"]]
 
 
@@ -177,12 +241,41 @@ def run_json(args, timeout: int = 120) -> dict:
 
 def open_folder(target: str) -> bool:
     if not os.path.exists(target):
-        return False
+        parent = os.path.dirname(target)
+        if os.path.isdir(parent):
+            target = parent
+        else:
+            return False
     try:
         if IS_WINDOWS:
             normalised = os.path.normpath(target)
-            subprocess.Popen(["explorer", "/select," + normalised] if os.path.isfile(target)
-                             else ["explorer", normalised])
+            folder = os.path.dirname(normalised) if os.path.isfile(normalised) else normalised
+            if os.path.isfile(normalised):
+                # Windows explorer /select,"<path>" fails when path contains characters like '#', '(', ')', '[', ']'
+                # which causes Explorer to fall back to opening Documents!
+                # Using 8.3 short paths resolves this completely.
+                try:
+                    import ctypes
+                    buf = ctypes.create_unicode_buffer(1024)
+                    if ctypes.windll.kernel32.GetShortPathNameW(normalised, buf, 1024) > 0 and buf.value:
+                        subprocess.Popen(f'explorer /select,"{buf.value}"')
+                        return True
+                except Exception:
+                    pass
+                # Safe fallback: open the parent folder directly (never drops to Documents)
+                try:
+                    os.startfile(folder)
+                    return True
+                except OSError:
+                    subprocess.Popen(f'explorer "{folder}"')
+                    return True
+            else:
+                try:
+                    os.startfile(folder)
+                    return True
+                except OSError:
+                    subprocess.Popen(f'explorer "{folder}"')
+                    return True
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-R", target] if os.path.isfile(target) else ["open", target])
         else:
@@ -190,3 +283,20 @@ def open_folder(target: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def open_file(target: str) -> bool:
+    if not os.path.isfile(target):
+        return False
+    try:
+        if IS_WINDOWS:
+            normalised = os.path.normpath(target)
+            os.startfile(normalised)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", target])
+        else:
+            subprocess.Popen(["xdg-open", target])
+        return True
+    except OSError:
+        return False
+

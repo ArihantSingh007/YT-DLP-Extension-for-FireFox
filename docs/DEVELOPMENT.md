@@ -80,32 +80,47 @@ test beside the existing ones — they use plain objects, no browser.
 
 ## Packaging and AMO submission
 
+Run the packaging script:
+
 ```bash
 cd extension
-npm run package        # -> web-ext-artifacts/ytdlp-bridge-<version>.zip
+npm ci
+npm run package
 ```
 
-The zip contains only `dist/`: four bundles, two HTML pages, one stylesheet, the
-manifest and the icons. No tests, no Python, no scripts, no binaries, no source
-maps.
+This generates two artifacts in `extension/web-ext-artifacts/`:
 
-Checked against Mozilla's current rules:
+1. **`ytdlp-bridge-2.0.0.zip`** (The Extension Package):
+   - Upload this to the main add-on upload field on AMO.
+   - Contains only the compiled `dist/` files: 4 JavaScript bundles (`content.js`, `background.js`, `options.js`, `popup.js`), 2 HTML pages, 1 stylesheet (`ui.css`), `manifest.json`, and icons.
+   - Contains zero binaries, zero source maps, zero tests, zero node_modules.
+   - Passes `npx addons-linter` with 0 errors, 0 warnings, and 0 notices.
 
-* **Remotely hosted code** — none. Everything the extension runs ships in the
-  package; nothing is fetched or evaluated at runtime.
-* **Minification** — the build is deliberately *not* minified, because AMO
-  reviewers must be able to read the shipped code. esbuild still bundles (content
-  scripts cannot use ES module imports), so attach the repository as the source
-  package with these build instructions: `npm ci && npm run build`, output in
-  `extension/dist`. esbuild and TypeScript are open source and run locally, which
-  is what Mozilla requires of build tools.
-* **Native messaging** — allowed. The helper is installed by the user through the
-  OS, never by the add-on, and the manifest's `allowed_extensions` pins the
-  extension ID, which is why the ID must stay `ytdlp-bridge@kcgamingtech` in
-  `public/manifest.json` and in the helper manifest written by the install script.
-* **Data policy** — the only data leaving the extension is the current video URL,
-  sent to the local helper, which is the add-on's stated primary function. No
-  telemetry, no remote endpoints, no cookies, nothing stored from private windows.
-* **Signing** — AMO signs the uploaded zip and handles updates. Unsigned builds
-  can only be loaded temporarily via `about:debugging`, which is a development
-  path, not a user path.
+2. **`ytdlp-bridge-2.0.0-source.zip`** (The Source Code for Reviewers):
+   - Upload this when AMO asks: *"Does your add-on contain code that is compiled or minified? -> Yes"*.
+   - Strictly excludes `node_modules/` (no `@esbuild/win32-x64/esbuild.exe`), `.git/`, `dist/`, and Python caches.
+   - Contains only human-authored source files, configurations (`package.json`, `package-lock.json`, `tsconfig.json`, `build.mjs`), and documentation.
+
+### Notes for AMO Reviewers (Copy & Paste to Reviewer Comments)
+
+```text
+Build Environment:
+- OS: Windows, Linux, or macOS
+- Node.js: 20 LTS (or newer)
+- npm: 10 (or newer)
+
+Reproduction Steps:
+1. Extract ytdlp-bridge-2.0.0-source.zip
+2. cd extension
+3. npm ci
+4. npm run build
+5. The resulting files in extension/dist/ are byte-for-byte identical (unminified ES bundles) to the submitted add-on.
+```
+
+### Checked against Mozilla's current policies:
+
+* **Remotely hosted code** — None. Everything the extension runs ships in the package; nothing is fetched, eval'd, or injected at runtime.
+* **Data Collection / Permissions** — The manifest specifies `"data_collection_permissions": { "required": ["none"] }`. The add-on collects no user data, no analytics, no telemetry, and reads no cookies.
+* **InnerHTML Safety** — Zero assignments to `innerHTML`. All DOM rendering uses safe `document.createElement`, `textContent`, and `dataset` properties.
+* **Minification** — The build is deliberately unminified (`minify: false` in `build.mjs`) so AMO reviewers can read the shipped code directly.
+* **Native messaging** — The helper is installed by the user through native scripts (`install.bat` / `install-windows.ps1` / `install-linux.sh` / `install-macos.sh`). The extension manifest pins the native messaging host `ytdlp_bridge` and allowed extension ID `ytdlp-bridge@kcgamingtech`.

@@ -12,7 +12,7 @@ from collections import deque
 
 import ytdlp
 
-PROGRESS_EVERY = 0.25
+PROGRESS_EVERY = 0.3
 
 
 class Jobs:
@@ -20,6 +20,7 @@ class Jobs:
         self.emit = emit
         self.lock = threading.RLock()
         self.jobs = {}          # id -> dict(state, process, cancelled, files)
+        self.completed = {}     # id -> filepath of completed downloads (bounded)
         self.queue = deque()
         self.active = 0
         self.limit = 2
@@ -57,6 +58,14 @@ class Jobs:
         if process and process.poll() is None:
             self._kill(process)
         return True
+
+    def get_job_file(self, job_id: str) -> str | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job and job.get("filepath"):
+                return job["filepath"]
+            return self.completed.get(job_id)
+
 
     def shutdown(self) -> None:
         with self.lock:
@@ -175,6 +184,13 @@ class Jobs:
             job = self.jobs[job_id]
             job["state"] = state
             job["process"] = None
+            filepath = fields.get("filepath")
+            if filepath:
+                job["filepath"] = filepath
+                self.completed[job_id] = filepath
+                if len(self.completed) > 50:
+                    oldest = next(iter(self.completed))
+                    del self.completed[oldest]
             if job["started"] and not job["settled"]:
                 job["settled"] = True
                 self.active = max(0, self.active - 1)

@@ -12,6 +12,7 @@ import os
 import struct
 import sys
 import threading
+import time
 import traceback
 from logging.handlers import RotatingFileHandler
 
@@ -107,12 +108,28 @@ jobs = Jobs(emit=write_message)
 
 # ------------------------------------------------------------------- actions
 
-def status(_request: dict) -> dict:
+_status_cache = None
+_status_cache_time = 0.0
+STATUS_CACHE_TTL = 60.0
+
+
+def invalidate_status_cache() -> None:
+    global _status_cache, _status_cache_time
+    _status_cache = None
+    _status_cache_time = 0.0
+
+
+def status(request: dict) -> dict:
+    global _status_cache, _status_cache_time
+    now = time.time()
+    if not request.get("refresh") and _status_cache is not None and (now - _status_cache_time < STATUS_CACHE_TTL):
+        return _status_cache
+
     config = load_config()
     ytdlp_path = ytdlp.find("yt-dlp", config.get("ytdlpPath", ""))
     ffmpeg_path = ytdlp.find("ffmpeg", config.get("ffmpegPath", ""))
     ytdlp_version = ytdlp.version_of(ytdlp_path)
-    return {
+    res = {
         "hostVersion": VERSION,
         "python": sys.version.split()[0],
         "ytdlp": {"found": bool(ytdlp_version), "path": ytdlp_path or None, "version": ytdlp_version or None},
@@ -121,6 +138,9 @@ def status(_request: dict) -> dict:
         "downloadDirectory": default_dir(),
         "logFile": os.path.join(ytdlp.config_dir(), "native-host.log"),
     }
+    _status_cache = res
+    _status_cache_time = now
+    return res
 
 
 def require_ytdlp() -> str:
@@ -132,7 +152,8 @@ def require_ytdlp() -> str:
 
 def get_info(request: dict) -> dict:
     url = validate.url(request.get("url"))
-    data = ytdlp.run_json(ytdlp.info_args(require_ytdlp(), url))
+    cookies_browser = validate.choice(request.get("cookiesBrowser"), validate.COOKIES_BROWSERS, "cookies browser", "none")
+    data = ytdlp.run_json(ytdlp.info_args(require_ytdlp(), url, cookies_browser))
     return {
         "id": data.get("id"), "title": data.get("title"),
         "uploader": data.get("uploader") or data.get("channel"),
@@ -167,9 +188,27 @@ def download(request: dict) -> dict:
         "overwrite": validate.choice(request.get("overwrite"), validate.OVERWRITE, "overwrite policy", "never"),
         "template": validate.template(request.get("outputTemplate"), ytdlp.DEFAULT_TEMPLATE),
         "dir": directory,
-        "maxConcurrent": request.get("maxConcurrent", 2),
+        "maxConcurrent": validate.integer_range(request.get("maxConcurrent"), 1, 8, 2),
         "ytdlp": require_ytdlp(),
         "ffmpeg": ffmpeg_path,
+        # Advanced yt-dlp capabilities
+        "embedThumbnail": validate.boolean(request.get("embedThumbnail"), True),
+        "embedChapters": validate.boolean(request.get("embedChapters"), True),
+        "embedMetadata": validate.boolean(request.get("embedMetadata"), True),
+        "writeSubtitles": validate.boolean(request.get("writeSubtitles"), False),
+        "writeAutoSubtitles": validate.boolean(request.get("writeAutoSubtitles"), False),
+        "embedSubtitles": validate.boolean(request.get("embedSubtitles"), False),
+        "subLangs": validate.sub_langs(request.get("subLangs")),
+        "subFormat": validate.choice(request.get("subFormat"), validate.SUB_FORMATS, "sub format", "best"),
+        "sponsorblockRemove": validate.choice(request.get("sponsorblockRemove"), validate.SPONSORBLOCK_REMOVE, "sponsorblock remove", "off"),
+        "sponsorblockMark": validate.choice(request.get("sponsorblockMark"), validate.SPONSORBLOCK_MARK, "sponsorblock mark", "off"),
+        "rateLimit": validate.rate_limit(request.get("rateLimit")),
+        "concurrentFragments": validate.integer_range(request.get("concurrentFragments"), 1, 16, 1),
+        "proxy": validate.proxy(request.get("proxy")),
+        "retries": validate.integer_range(request.get("retries"), 1, 30, 5),
+        "cookiesBrowser": validate.choice(request.get("cookiesBrowser"), validate.COOKIES_BROWSERS, "cookies browser", "none"),
+        "keepVideo": validate.boolean(request.get("keepVideo"), False),
+        "customArgs": validate.custom_args(request.get("customArgs")),
     }
     return jobs.start(spec)
 
@@ -179,15 +218,42 @@ def cancel(request: dict) -> dict:
     return {"cancelled": jobs.cancel(job_id)}
 
 
+def _resolve_target(request: dict, is_file: bool = False) -> str:
+    file_path = None
+    job_id = request.get("jobId")
+    if job_id:
+        valid_id = validate.request_id(job_id)
+        file_path = jobs.get_job_file(valid_id)
+
+    raw = file_path or str(request.get("path") or "")
+    if not raw:
+        if job_id:
+            raise Invalid("FILE_NOT_FOUND", "No completed file was found for that download job.")
+        raise Invalid("BAD_PATH", "No path or job ID was specified.")
+
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    parent_dir = os.path.dirname(expanded) if is_file or not os.path.isdir(expanded) else expanded
+    validate.directory(parent_dir, roots(), default_dir())
+
+    if is_file:
+        if not os.path.isfile(expanded):
+            raise Invalid("FILE_NOT_FOUND", "The requested file does not exist.")
+        return expanded
+    return expanded
+
+
 def open_folder(request: dict) -> dict:
-    raw = str(request.get("path") or "")
-    folder = raw if os.path.isdir(os.path.expanduser(raw)) else os.path.dirname(os.path.expanduser(raw))
-    resolved = validate.directory(folder, roots(), default_dir())
-    target = os.path.expanduser(raw) if os.path.isfile(os.path.expanduser(raw)) else resolved
+    target = _resolve_target(request, is_file=False)
     return {"opened": ytdlp.open_folder(target)}
 
 
+def open_file(request: dict) -> dict:
+    target = _resolve_target(request, is_file=True)
+    return {"opened": ytdlp.open_file(target)}
+
+
 def set_config(request: dict) -> dict:
+    invalidate_status_cache()
     patch = {
         "ytdlpPath": validate.executable(request.get("ytdlpPath"), "yt-dlp"),
         "ffmpegPath": validate.executable(request.get("ffmpegPath"), "FFmpeg"),
@@ -211,11 +277,12 @@ HANDLERS = {
     "download": download,
     "cancel": cancel,
     "open_folder": open_folder,
+    "open_file": open_file,
     "set_config": set_config,
 }
 # Actions that shell out run on their own thread so a slow metadata lookup
 # never blocks a cancel request.
-THREADED = {"get_status", "get_info", "open_folder", "set_config"}
+THREADED = {"get_status", "get_info", "open_folder", "open_file", "set_config"}
 
 
 def handle(message: dict) -> None:

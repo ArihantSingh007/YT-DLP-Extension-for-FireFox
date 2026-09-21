@@ -20,7 +20,24 @@
     outputTemplate: "%(title)s [%(id)s].%(ext)s",
     overwrite: "never",
     maxConcurrent: 2,
-    lastMode: "video"
+    lastMode: "video",
+    embedThumbnail: true,
+    embedChapters: true,
+    embedMetadata: true,
+    writeSubtitles: false,
+    writeAutoSubtitles: false,
+    embedSubtitles: false,
+    subLangs: "en.*,all",
+    subFormat: "best",
+    sponsorblockRemove: "off",
+    sponsorblockMark: "off",
+    rateLimit: "",
+    concurrentFragments: 1,
+    proxy: "",
+    retries: 5,
+    cookiesBrowser: "none",
+    keepVideo: false,
+    customArgs: ""
   };
   async function getSettings() {
     const stored = await ext.storage.local.get("settings");
@@ -70,9 +87,6 @@
     const m = Math.floor(t % 3600 / 60);
     const s = String(t % 60).padStart(2, "0");
     return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
-  }
-  function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   }
 
   // src/formats.ts
@@ -197,9 +211,25 @@
   // src/content.ts
   var BUTTON_ID = "ytdlp-bridge-btn";
   var HOST_ID = "ytdlp-bridge-ui";
-  var WATCH_ANCHORS = ["ytd-watch-metadata #top-level-buttons-computed", "#top-level-buttons-computed", "ytd-watch-metadata #actions"];
-  var SHORTS_ANCHORS = ["ytd-reel-video-renderer[is-active] #actions", "#shorts-container #actions"];
+  var WATCH_ANCHORS = [
+    "ytd-watch-metadata #top-level-buttons-computed",
+    "ytd-watch-metadata ytd-menu-renderer #top-level-buttons-computed",
+    "#actions-inner #top-level-buttons-computed",
+    "#top-level-buttons-computed",
+    "ytd-watch-metadata #actions",
+    "#actions.ytd-watch-metadata",
+    "#menu-container #top-level-buttons-computed"
+  ];
+  var SHORTS_ANCHORS = [
+    "ytd-reel-video-renderer[is-active] #actions",
+    "#shorts-container ytd-reel-video-renderer[is-active] #actions",
+    "#shorts-container #actions",
+    "ytd-reel-player-overlay-renderer #actions"
+  ];
+  var boundButtons = /* @__PURE__ */ new WeakSet();
   var observer = null;
+  var navTimers = [];
+  var pendingCheck = false;
   var currentId = null;
   function anchorFor(shorts) {
     for (const selector of shorts ? SHORTS_ANCHORS : WATCH_ANCHORS) {
@@ -208,15 +238,55 @@
     }
     return null;
   }
-  function makeButton(shorts) {
+  function findExistingDownloadButton(container) {
+    const dlRenderer = container.querySelector("ytd-download-button-renderer button");
+    if (dlRenderer && (typeof HTMLButtonElement === "undefined" || dlRenderer instanceof HTMLButtonElement)) {
+      return dlRenderer;
+    }
+    const buttons = container.querySelectorAll("button");
+    for (const btn of buttons) {
+      if (btn.id === BUTTON_ID) continue;
+      const label = (btn.getAttribute("aria-label") || "").toLowerCase();
+      const title = (btn.getAttribute("title") || "").toLowerCase();
+      const text = (btn.textContent || "").trim().toLowerCase();
+      if (label.includes("download") || title.includes("download") || text === "download") {
+        return btn;
+      }
+    }
+    return null;
+  }
+  function bindExistingButton(btn) {
+    if (boundButtons.has(btn)) return;
+    boundButtons.add(btn);
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      void openDialog();
+    }, true);
+  }
+  function createShortsSvg() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "24");
+    svg.setAttribute("height", "24");
+    svg.style.pointerEvents = "none";
+    svg.style.display = "block";
+    svg.style.margin = "auto";
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("fill", "currentColor");
+    path.setAttribute("d", "M12 3v10.55l3.5-3.55.7.7-4.7 4.75-4.7-4.75.7-.7 3.5 3.55V3h1zM4 17h16v2H4v-2z");
+    svg.append(path);
+    return svg;
+  }
+  function makeShortsButton() {
     const button = document.createElement("button");
     button.id = BUTTON_ID;
     button.type = "button";
     button.title = "Download with yt-dlp";
     button.setAttribute("aria-label", "Download with yt-dlp");
-    button.textContent = "Download";
-    button.style.cssText = "display:inline-flex;align-items:center;height:36px;padding:0 14px;margin-left:8px;border:0;cursor:pointer;border-radius:18px;font:500 14px/36px Roboto,'Segoe UI',system-ui,sans-serif;background:var(--yt-spec-badge-chip-background,rgba(128,128,128,.18));color:var(--yt-spec-text-primary,inherit)" + (shorts ? ";margin:0;width:48px;height:48px;padding:0;border-radius:50%;font-size:0" : "");
-    if (shorts) button.textContent = "\u2B73";
+    button.append(createShortsSvg());
+    button.style.cssText = "display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:50%;margin-top:16px;padding:0;border:0;cursor:pointer;background:var(--yt-spec-badge-chip-background,rgba(255,255,255,.15));color:var(--yt-spec-text-primary,#fff);";
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -224,32 +294,79 @@
     });
     return button;
   }
-  function place() {
+  function makeFallbackWatchButton() {
+    const button = document.createElement("button");
+    button.id = BUTTON_ID;
+    button.type = "button";
+    button.title = "Download with yt-dlp";
+    button.setAttribute("aria-label", "Download with yt-dlp");
+    button.textContent = "Download";
+    button.style.cssText = "display:inline-flex;align-items:center;height:36px;padding:0 14px;margin-left:8px;border:0;cursor:pointer;border-radius:18px;font:500 14px/36px Roboto,'Segoe UI',system-ui,sans-serif;background:var(--yt-spec-badge-chip-background,rgba(128,128,128,.18));color:var(--yt-spec-text-primary,inherit);";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openDialog();
+    });
+    return button;
+  }
+  function bindOrPlace() {
     const target = videoUrl(location.href);
-    const existing = document.getElementById(BUTTON_ID);
+    const existingCustom = document.getElementById(BUTTON_ID);
     if (!target) {
-      existing?.remove();
+      existingCustom?.remove();
       return true;
     }
     const anchor = anchorFor(target.shorts);
     if (!anchor) return false;
-    if (existing?.parentElement === anchor) return true;
-    existing?.remove();
-    anchor.append(makeButton(target.shorts));
+    if (target.shorts) {
+      if (existingCustom?.parentElement === anchor) return true;
+      existingCustom?.remove();
+      anchor.append(makeShortsButton());
+      return true;
+    }
+    const nativeBtn = findExistingDownloadButton(anchor);
+    if (nativeBtn) {
+      existingCustom?.remove();
+      bindExistingButton(nativeBtn);
+      return true;
+    }
+    if (existingCustom?.parentElement === anchor) return true;
+    existingCustom?.remove();
+    anchor.append(makeFallbackWatchButton());
     return true;
   }
-  function ensureButton() {
-    observer?.disconnect();
-    observer = null;
-    if (place()) return;
-    const scope = document.querySelector("ytd-watch-flexy, ytd-shorts, ytd-page-manager") ?? document.body;
-    observer = new MutationObserver(() => {
-      if (place()) {
-        observer?.disconnect();
-        observer = null;
-      }
+  function scheduleCheck() {
+    if (pendingCheck) return;
+    pendingCheck = true;
+    requestAnimationFrame(() => {
+      pendingCheck = false;
+      bindOrPlace();
     });
-    observer.observe(scope, { childList: true, subtree: true });
+  }
+  function startObserver() {
+    if (observer) return;
+    observer = new MutationObserver(() => {
+      scheduleCheck();
+    });
+    const targetNode = document.querySelector("ytd-page-manager") ?? document.body;
+    if (targetNode) {
+      observer.observe(targetNode, { childList: true, subtree: true });
+    }
+  }
+  function clearNavTimers() {
+    for (const t of navTimers) clearTimeout(t);
+    navTimers = [];
+  }
+  function ensureButton() {
+    startObserver();
+    bindOrPlace();
+    clearNavTimers();
+    const delays = [100, 250, 500, 900, 1500, 2500, 4e3];
+    for (const delay of delays) {
+      navTimers.push(window.setTimeout(() => {
+        bindOrPlace();
+      }, delay));
+    }
   }
   function onNavigate() {
     const target = videoUrl(location.href);
@@ -260,59 +377,97 @@
     ensureButton();
   }
   var CSS = `
-:host { all: initial; }
+:host { all: initial; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 .back { position: fixed; inset: 0; z-index: 2147483000; display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,.5); padding: 20px; font: 14px/1.45 "Segoe UI", Roboto, system-ui, sans-serif; }
-.card { width: min(420px,100%); max-height: 84vh; overflow: auto; background: #fff; color: #17171a;
-  border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.35); }
-@media (prefers-color-scheme: dark) { .card { background: #1f1f23; color: #f1f1f3; } }
-.head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid rgba(128,128,128,.28); }
-.head h2 { margin: 0; font-size: 16px; font-weight: 600; }
-.x { border: 0; background: transparent; color: inherit; font-size: 20px; line-height: 1; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
-.x:hover { background: rgba(128,128,128,.18); }
-.body { padding: 16px; display: grid; gap: 14px; }
-.video { display: flex; gap: 12px; align-items: flex-start; }
-.video img { width: 96px; height: 54px; border-radius: 6px; object-fit: cover; background: rgba(128,128,128,.2); }
-.t { font-weight: 600; margin: 0 0 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.sub, .note { color: #5c5c66; font-size: 13px; margin: 0; }
-@media (prefers-color-scheme: dark) { .sub, .note { color: #b4b4bd; } }
-.label { font-weight: 600; margin: 0; }
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.big { padding: 18px 12px; border: 1px solid rgba(128,128,128,.4); border-radius: 10px; background: transparent; color: inherit;
-  font: 600 15px inherit; cursor: pointer; }
-.big:hover, .opt:hover { border-color: #2f6fed; }
-.list { display: grid; gap: 6px; }
+  background: rgba(0,0,0,.65); backdrop-filter: blur(5px); padding: 20px; font: 14px/1.45 inherit; }
+.card { width: min(440px,100%); max-height: 86vh; overflow-y: auto; background: #ffffff; color: #0f172a;
+  border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.45); display: flex; flex-direction: column;
+  border: 1px solid rgba(0,0,0,.08); transition: transform .15s ease-out; }
+@media (prefers-color-scheme: dark) {
+  .card { background: #161821; color: #f8fafc; border: 1px solid rgba(255,255,255,.09); box-shadow: 0 24px 64px rgba(0,0,0,.7); }
+}
+.head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px 20px; border-bottom: 1px solid rgba(128,128,128,.16); }
+.head h2 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+.x { border: 0; background: transparent; color: inherit; font-size: 20px; line-height: 1; width: 32px; height: 32px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: .7; transition: background .15s, opacity .15s; }
+.x:hover { background: rgba(128,128,128,.18); opacity: 1; }
+.body { padding: 20px; display: grid; gap: 16px; }
+.video { display: flex; gap: 14px; align-items: flex-start; }
+.video img { width: 104px; height: 58px; border-radius: 8px; object-fit: cover; background: rgba(128,128,128,.18); flex-shrink: 0; }
+.t { font-weight: 600; font-size: 14px; margin: 0 0 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.35; }
+.sub, .note { color: #64748b; font-size: 12.5px; margin: 0; }
+@media (prefers-color-scheme: dark) { .sub, .note { color: #94a3b8; } }
+.label { font-weight: 600; font-size: 13.5px; margin: 0; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.big { padding: 20px 14px; border: 1px solid rgba(128,128,128,.28); border-radius: 12px; background: rgba(128,128,128,.05); color: inherit;
+  font: 600 15px inherit; cursor: pointer; transition: all .15s ease; text-align: center; }
+.big:hover { border-color: #3b82f6; background: rgba(59,130,246,.08); transform: translateY(-1px); }
+.list { display: grid; gap: 8px; outline: none; }
 .opt { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; text-align: left;
-  padding: 11px 12px; border: 1px solid rgba(128,128,128,.4); border-radius: 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.opt[aria-checked="true"] { border-color: #2f6fed; box-shadow: inset 0 0 0 1px #2f6fed; }
-.opt .name { font-weight: 600; }
-.foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-top: 1px solid rgba(128,128,128,.28); }
-.go { background: #2f6fed; color: #fff; border: 0; border-radius: 9px; padding: 10px 18px; font: 600 14px inherit; cursor: pointer; }
-.go[disabled] { opacity: .5; cursor: not-allowed; }
-.ghost { background: transparent; color: inherit; border: 1px solid rgba(128,128,128,.4); border-radius: 9px; padding: 9px 14px; font: 600 14px inherit; cursor: pointer; }
-.bar { height: 6px; border-radius: 99px; background: rgba(128,128,128,.25); overflow: hidden; }
-.bar i { display: block; height: 100%; background: #2f6fed; }
-.det { white-space: pre-wrap; font: 11.5px ui-monospace, Consolas, monospace; background: rgba(128,128,128,.14);
-  padding: 8px; border-radius: 8px; max-height: 140px; overflow: auto; }
-input.dir { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(128,128,128,.45); background: transparent; color: inherit; font: inherit; }
-button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+  padding: 12px 14px; border: 1px solid rgba(128,128,128,.25); border-radius: 12px; background: rgba(128,128,128,.04); color: inherit; font: inherit; cursor: pointer; transition: all .15s ease; }
+.opt:hover { border-color: #3b82f6; background: rgba(59,130,246,.06); }
+.opt[aria-checked="true"] { border-color: #3b82f6; box-shadow: inset 0 0 0 1px #3b82f6; background: rgba(59,130,246,.12); font-weight: 600; }
+.opt .name { font-size: 13.5px; }
+.foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-top: 1px solid rgba(128,128,128,.16); margin-top: auto; }
+.go { background: #2563eb; color: #fff; border: 0; border-radius: 10px; padding: 10px 20px; font: 600 13.5px inherit; cursor: pointer; transition: background .15s, transform .05s; box-shadow: 0 2px 8px rgba(37,99,235,.28); }
+.go:hover { background: #1d4ed8; }
+.go:active { transform: scale(.98); }
+.go[disabled] { opacity: .5; cursor: not-allowed; box-shadow: none; }
+.ghost { background: transparent; color: inherit; border: 1px solid rgba(128,128,128,.3); border-radius: 10px; padding: 9px 16px; font: 600 13.5px inherit; cursor: pointer; transition: all .15s ease; }
+.ghost:hover { background: rgba(128,128,128,.14); }
+.bar { height: 7px; border-radius: 99px; background: rgba(128,128,128,.2); overflow: hidden; }
+.bar i { display: block; height: 100%; background: linear-gradient(90deg, #3b82f6, #6366f1); border-radius: 99px; transition: width .2s ease-out; }
+.det { white-space: pre-wrap; font: 11.5px ui-monospace, Consolas, monospace; background: rgba(128,128,128,.12);
+  padding: 10px 12px; border-radius: 10px; max-height: 140px; overflow: auto; line-height: 1.4; }
+input.dir { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.05); color: inherit; font: inherit; font-size: 13px; box-sizing: border-box; }
+button:focus-visible, input:focus-visible, .list:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
 `;
   var root = null;
   var state = {};
-  function card(title) {
-    root.querySelector(".back")?.remove();
-    const back = document.createElement("div");
-    back.className = "back";
-    back.addEventListener("mousedown", (e) => {
-      if (e.target === back) closeDialog();
-    });
-    back.innerHTML = `<div class="card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
-    <div class="head"><h2>${escapeHtml(title)}</h2><button class="x" aria-label="Close">\xD7</button></div>
-    <div class="body"></div></div>`;
-    back.querySelector(".x").addEventListener("click", closeDialog);
-    root.append(back);
-    back.querySelector(".x").focus();
-    return back.querySelector(".body");
+  function getOrCreateCard(title) {
+    let back = root.querySelector(".back");
+    if (!back) {
+      back = document.createElement("div");
+      back.className = "back";
+      back.addEventListener("mousedown", (e) => {
+        if (e.target === back) closeDialog();
+      });
+      const card = document.createElement("div");
+      card.className = "card";
+      card.setAttribute("role", "dialog");
+      card.setAttribute("aria-modal", "true");
+      card.setAttribute("aria-label", title);
+      const head = document.createElement("div");
+      head.className = "head";
+      const h2 = document.createElement("h2");
+      h2.id = "card-title";
+      h2.textContent = title;
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "x";
+      closeBtn.setAttribute("aria-label", "Close");
+      closeBtn.textContent = "\xD7";
+      closeBtn.addEventListener("click", closeDialog);
+      head.append(h2, closeBtn);
+      const body2 = document.createElement("div");
+      body2.className = "body";
+      body2.id = "card-body";
+      const foot2 = document.createElement("div");
+      foot2.className = "foot";
+      foot2.id = "card-foot";
+      card.append(head, body2, foot2);
+      back.append(card);
+      root.append(back);
+      closeBtn.focus();
+    } else {
+      const headTitle = back.querySelector("#card-title");
+      if (headTitle) headTitle.textContent = title;
+      const cardEl = back.querySelector(".card");
+      if (cardEl) cardEl.setAttribute("aria-label", title);
+    }
+    const body = back.querySelector("#card-body");
+    const foot = back.querySelector("#card-foot");
+    body.replaceChildren();
+    foot.replaceChildren();
+    return { body, foot };
   }
   function onKey(event) {
     if (event.key === "Escape" && root) {
@@ -338,7 +493,26 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
     root.append(style);
     document.body.append(host);
     document.addEventListener("keydown", onKey, true);
-    card("Download").innerHTML = `<p class="sub">Reading available qualities\u2026</p>`;
+    const activeReply = await send({ type: "jobForUrl", url: target.url });
+    if (!root) return;
+    if (activeReply.ok && activeReply.data) {
+      const existing = activeReply.data;
+      if (existing.state === "queued" || existing.state === "downloading" || existing.state === "processing") {
+        state.jobId = existing.id;
+        showProgress(existing);
+        return;
+      }
+      if (existing.state === "completed") {
+        state.jobId = existing.id;
+        showDone(existing);
+        return;
+      }
+    }
+    const { body } = getOrCreateCard("Download");
+    const loadingP = document.createElement("p");
+    loadingP.className = "sub";
+    loadingP.textContent = "Reading available qualities\u2026";
+    body.append(loadingP);
     const [depsReply, infoReply] = await Promise.all([
       send({ type: "deps" }),
       send({ type: "info", url: target.url })
@@ -355,13 +529,25 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
     state.dir = state.settings.downloadDirectory;
     showModes();
   }
-  function header() {
-    const i = state.info;
-    return `<div class="video">
-    ${i.thumbnail ? `<img alt="" src="${escapeHtml(safeUrl(i.thumbnail))}">` : `<img alt="">`}
-    <div><p class="t">${escapeHtml(i.title)}</p>
-      <p class="sub">${escapeHtml([i.uploader, clock(i.duration), i.isLive ? "Live" : ""].filter(Boolean).join(" \u2022 "))}</p></div>
-  </div>`;
+  function createHeader(i) {
+    const wrap = document.createElement("div");
+    wrap.className = "video";
+    const img = document.createElement("img");
+    img.alt = "";
+    if (i.thumbnail) {
+      const src = safeUrl(i.thumbnail);
+      if (src) img.src = src;
+    }
+    const meta = document.createElement("div");
+    const titleP = document.createElement("p");
+    titleP.className = "t";
+    titleP.textContent = i.title;
+    const subP = document.createElement("p");
+    subP.className = "sub";
+    subP.textContent = [i.uploader, clock(i.duration), i.isLive ? "Live" : ""].filter(Boolean).join(" \u2022 ");
+    meta.append(titleP, subP);
+    wrap.append(img, meta);
+    return wrap;
   }
   function safeUrl(value) {
     try {
@@ -372,10 +558,51 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
     }
   }
   function showModes() {
-    const body = card("Download");
-    body.innerHTML = `${header()}<p class="label">Download as</p>
-    <div class="pair"><button class="big" data-m="video">Video</button><button class="big" data-m="audio">Music</button></div>`;
-    body.querySelectorAll("[data-m]").forEach((button) => button.addEventListener("click", () => showChoices(button.dataset.m)));
+    const { body } = getOrCreateCard("Download");
+    body.append(createHeader(state.info));
+    const label = document.createElement("p");
+    label.className = "label";
+    label.textContent = "Download as";
+    const pair = document.createElement("div");
+    pair.className = "pair";
+    const videoBtn = document.createElement("button");
+    videoBtn.className = "big";
+    videoBtn.dataset.m = "video";
+    videoBtn.textContent = "Video";
+    videoBtn.addEventListener("click", () => showChoices("video"));
+    const audioBtn = document.createElement("button");
+    audioBtn.className = "big";
+    audioBtn.dataset.m = "audio";
+    audioBtn.textContent = "Music";
+    audioBtn.addEventListener("click", () => showChoices("audio"));
+    pair.append(videoBtn, audioBtn);
+    body.append(label, pair);
+  }
+  function selectChoice(choice) {
+    state.pick = choice;
+    if (!root) return;
+    const options = root.querySelectorAll(".opt");
+    options.forEach((btn) => {
+      const isChosen = btn.getAttribute("data-key") === choice.key;
+      btn.setAttribute("aria-checked", String(isChosen));
+    });
+    const missing = choice.needsFfmpeg && !state.deps?.ffmpeg.found;
+    const goBtn = root.querySelector("#btn-download");
+    const missingNote = root.querySelector("#missing-note");
+    if (goBtn) goBtn.disabled = Boolean(missing);
+    if (missingNote) missingNote.textContent = missing ? "FFmpeg is required for this choice." : "";
+  }
+  function onListKeyDown(e) {
+    if (!state.choices || !state.choices.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const currIndex = state.choices.findIndex((c) => c.key === state.pick?.key);
+      const nextIndex = e.key === "ArrowDown" ? (currIndex + 1) % state.choices.length : (currIndex - 1 + state.choices.length) % state.choices.length;
+      const next = state.choices[nextIndex];
+      selectChoice(next);
+      const nextBtn = root?.querySelector(`.opt[data-key="${next.key}"]`);
+      nextBtn?.focus();
+    }
   }
   function showChoices(mode) {
     const settings = state.settings;
@@ -384,40 +611,86 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
     const info = state.info;
     state.choices = mode === "video" ? videoChoices(info.formats, info.duration ?? null, settings) : audioChoices(info.formats, info.duration ?? null, settings);
     state.pick = state.choices.find((c) => c.key === (mode === "audio" ? settings.audioFormat : "best")) ?? state.choices[0];
-    const body = card(mode === "video" ? "Video" : "Music");
+    const { body, foot } = getOrCreateCard(mode === "video" ? "Video" : "Music");
     if (!state.choices.length) {
-      body.innerHTML = `<p class="sub">No ${mode === "video" ? "video" : "audio"} formats are available for this video.</p>`;
+      const sub = document.createElement("p");
+      sub.className = "sub";
+      sub.textContent = `No ${mode === "video" ? "video" : "audio"} formats are available for this video.`;
+      body.append(sub);
       return;
     }
-    body.innerHTML = `<p class="label" id="pick-label">${mode === "video" ? "Quality" : "Format"}</p>
-    <div class="list" role="radiogroup" aria-labelledby="pick-label"></div>
-    <p class="note">${mode === "video" ? `Saved as ${settings.container.toUpperCase()}` : ""}</p>
-    ${settings.askWhereToSave ? `<label class="label" for="dir">Save to</label><input class="dir" id="dir" spellcheck="false" placeholder="Downloads folder" value="${escapeHtml(state.dir ?? "")}">` : ""}`;
-    const list = body.querySelector(".list");
+    const missing = Boolean(state.pick?.needsFfmpeg && !state.deps?.ffmpeg.found);
+    const label = document.createElement("p");
+    label.className = "label";
+    label.id = "pick-label";
+    label.textContent = mode === "video" ? "Quality" : "Format";
+    const list = document.createElement("div");
+    list.className = "list";
+    list.setAttribute("role", "radiogroup");
+    list.setAttribute("aria-labelledby", "pick-label");
+    list.tabIndex = 0;
     for (const choice of state.choices) {
       const option = document.createElement("button");
       option.className = "opt";
       option.type = "button";
       option.setAttribute("role", "radio");
+      option.setAttribute("data-key", choice.key);
       option.setAttribute("aria-checked", String(choice.key === state.pick?.key));
-      option.innerHTML = `<span class="name">${escapeHtml(choice.label)}</span><span class="note">${escapeHtml(choice.note)}</span>`;
-      option.addEventListener("click", () => {
-        state.pick = choice;
-        showChoices(mode);
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "name";
+      nameSpan.textContent = choice.label;
+      const noteSpan = document.createElement("span");
+      noteSpan.className = "note";
+      noteSpan.textContent = choice.note;
+      option.append(nameSpan, noteSpan);
+      option.addEventListener("click", (e) => {
+        e.preventDefault();
+        selectChoice(choice);
       });
       list.append(option);
     }
-    body.querySelector("#dir")?.addEventListener("change", (e) => {
-      state.dir = e.target.value.trim();
-    });
-    const foot = document.createElement("div");
-    foot.className = "foot";
-    const missing = state.pick?.needsFfmpeg && !state.deps?.ffmpeg.found;
-    foot.innerHTML = `<span class="note">${missing ? "FFmpeg is required for this choice." : ""}</span>
-    <span><button class="ghost" data-back>Back</button> <button class="go" ${missing ? "disabled" : ""}>Download</button></span>`;
-    body.parentElement.append(foot);
-    foot.querySelector("[data-back]").addEventListener("click", showModes);
-    foot.querySelector(".go").addEventListener("click", () => void startDownload());
+    list.addEventListener("keydown", (e) => onListKeyDown(e));
+    body.append(label, list);
+    if (mode === "video") {
+      const noteP = document.createElement("p");
+      noteP.className = "note";
+      noteP.textContent = `Saved as ${settings.container.toUpperCase()}`;
+      body.append(noteP);
+    }
+    if (settings.askWhereToSave) {
+      const dirLabel = document.createElement("label");
+      dirLabel.className = "label";
+      dirLabel.htmlFor = "dir";
+      dirLabel.textContent = "Save to";
+      const dirInput = document.createElement("input");
+      dirInput.className = "dir";
+      dirInput.id = "dir";
+      dirInput.spellcheck = false;
+      dirInput.placeholder = "Downloads folder";
+      dirInput.value = state.dir ?? "";
+      dirInput.addEventListener("input", (e) => {
+        state.dir = e.target.value.trim();
+      });
+      body.append(dirLabel, dirInput);
+    }
+    const missingSpan = document.createElement("span");
+    missingSpan.className = "note";
+    missingSpan.id = "missing-note";
+    missingSpan.textContent = missing ? "FFmpeg is required for this choice." : "";
+    const btnSpan = document.createElement("span");
+    const backBtn = document.createElement("button");
+    backBtn.className = "ghost";
+    backBtn.setAttribute("data-back", "");
+    backBtn.textContent = "Back";
+    backBtn.addEventListener("click", showModes);
+    const dlBtn = document.createElement("button");
+    dlBtn.className = "go";
+    dlBtn.id = "btn-download";
+    dlBtn.disabled = missing;
+    dlBtn.textContent = "Download";
+    dlBtn.addEventListener("click", () => void startDownload());
+    btnSpan.append(backBtn, document.createTextNode(" "), dlBtn);
+    foot.append(missingSpan, btnSpan);
   }
   async function startDownload() {
     const { pick, info, mode } = state;
@@ -441,37 +714,98 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
     state.jobId = reply.data.id;
     state.awaitingJob = false;
   }
-  function showProgress(job) {
-    const body = card(job.stage ?? "Downloading");
-    const percent = Math.max(0, Math.min(100, job.percent ?? 0));
-    const line = [
+  function formatProgressLine(job) {
+    return [
       job.totalBytes ? `${bytes(job.downloadedBytes)} / ${bytes(job.totalBytes)}` : bytes(job.downloadedBytes),
       job.speed ? `${bytes(job.speed)}/s` : "",
       job.eta ? `${clock(job.eta)} left` : ""
     ].filter(Boolean).join(" \u2022 ");
-    body.innerHTML = `<p class="t">${escapeHtml(job.title)}</p><p class="sub">${escapeHtml(job.label)}</p>
-    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent.toFixed(0)}">
-      <i style="width:${percent.toFixed(1)}%"></i></div>
-    <p class="note" aria-live="polite">${percent.toFixed(0)}% ${escapeHtml(line ? "\u2022 " + line : "")}</p>`;
-    const foot = document.createElement("div");
-    foot.className = "foot";
-    foot.innerHTML = `<span class="note"></span><span><button class="ghost" data-hide>Hide</button> <button class="go" data-cancel>Cancel</button></span>`;
-    body.parentElement.append(foot);
-    foot.querySelector("[data-hide]").addEventListener("click", closeDialog);
-    foot.querySelector("[data-cancel]").addEventListener("click", () => {
+  }
+  function showProgress(job) {
+    const percent = Math.max(0, Math.min(100, job.percent ?? 0));
+    const line = formatProgressLine(job);
+    const { body, foot } = getOrCreateCard(job.stage ?? "Downloading");
+    const titleP = document.createElement("p");
+    titleP.className = "t";
+    titleP.textContent = job.title;
+    const subP = document.createElement("p");
+    subP.className = "sub";
+    subP.textContent = job.label;
+    const barWrap = document.createElement("div");
+    barWrap.className = "bar";
+    barWrap.setAttribute("role", "progressbar");
+    barWrap.setAttribute("aria-valuemin", "0");
+    barWrap.setAttribute("aria-valuemax", "100");
+    barWrap.setAttribute("aria-valuenow", percent.toFixed(0));
+    const barI = document.createElement("i");
+    barI.id = "prog-bar";
+    barI.style.width = `${percent.toFixed(1)}%`;
+    barWrap.append(barI);
+    const noteP = document.createElement("p");
+    noteP.className = "note";
+    noteP.id = "prog-text";
+    noteP.setAttribute("aria-live", "polite");
+    noteP.textContent = `${percent.toFixed(0)}% ${line ? "\u2022 " + line : ""}`;
+    body.append(titleP, subP, barWrap, noteP);
+    const footSpan1 = document.createElement("span");
+    footSpan1.className = "note";
+    const footSpan2 = document.createElement("span");
+    const hideBtn = document.createElement("button");
+    hideBtn.className = "ghost";
+    hideBtn.setAttribute("data-hide", "");
+    hideBtn.textContent = "Hide";
+    hideBtn.addEventListener("click", closeDialog);
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "go";
+    cancelBtn.setAttribute("data-cancel", "");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", () => {
       if (state.jobId) void send({ type: "cancel", jobId: state.jobId });
     });
+    footSpan2.append(hideBtn, document.createTextNode(" "), cancelBtn);
+    foot.append(footSpan1, footSpan2);
+  }
+  function updateProgress(job) {
+    if (!root) return;
+    const bar = root.querySelector("#prog-bar");
+    const barContainer = root.querySelector(".bar");
+    const text = root.querySelector("#prog-text");
+    const title = root.querySelector("#card-title");
+    if (!bar || !text) {
+      showProgress(job);
+      return;
+    }
+    const percent = Math.max(0, Math.min(100, job.percent ?? 0));
+    if (title && job.stage) title.textContent = job.stage;
+    bar.style.width = `${percent.toFixed(1)}%`;
+    barContainer?.setAttribute("aria-valuenow", percent.toFixed(0));
+    const line = formatProgressLine(job);
+    text.textContent = `${percent.toFixed(0)}% ${line ? "\u2022 " + line : ""}`;
   }
   function showDone(job) {
-    const body = card("Download completed");
-    body.innerHTML = `<p class="t">${escapeHtml(job.filepath?.split(/[\\/]/).pop() ?? job.title)}</p>
-    <p class="sub">Saved.</p>`;
-    const foot = document.createElement("div");
-    foot.className = "foot";
-    foot.innerHTML = `<span></span><span><button class="ghost" data-folder>Open folder</button> <button class="go" data-close>Close</button></span>`;
-    body.parentElement.append(foot);
-    foot.querySelector("[data-close]").addEventListener("click", closeDialog);
-    foot.querySelector("[data-folder]").addEventListener("click", () => void send({ type: "openFolder", path: job.filepath ?? "" }));
+    const filename = job.filepath?.split(/[\\/]/).pop() ?? job.title;
+    const { body, foot } = getOrCreateCard("Download completed");
+    const titleP = document.createElement("p");
+    titleP.className = "t";
+    titleP.textContent = filename;
+    const subP = document.createElement("p");
+    subP.className = "sub";
+    subP.textContent = "Download completed.";
+    body.append(titleP, subP);
+    const footSpan1 = document.createElement("span");
+    const footSpan2 = document.createElement("span");
+    const locBtn = document.createElement("button");
+    locBtn.className = "ghost";
+    locBtn.setAttribute("data-location", "");
+    locBtn.textContent = "Show file location";
+    locBtn.addEventListener("click", () => void send({ type: "openFolder", jobId: job.id, path: job.filepath ?? "" }));
+    const openBtn = document.createElement("button");
+    openBtn.className = "go";
+    openBtn.setAttribute("data-open", "");
+    openBtn.textContent = "Open";
+    openBtn.addEventListener("click", () => void send({ type: "openFile", jobId: job.id, path: job.filepath ?? "" }));
+    footSpan2.append(locBtn, document.createTextNode(" "), openBtn);
+    foot.append(footSpan1, footSpan2);
   }
   var FRIENDLY = {
     NO_HELPER: { title: "Setup required", text: "The local helper is not installed.", action: "Set up" },
@@ -484,35 +818,72 @@ button:focus-visible, input:focus-visible { outline: 2px solid #2f6fed; outline-
   };
   function showError(error) {
     const friendly = FRIENDLY[error.code] ?? { title: "Download failed", text: error.message };
-    const body = card(friendly.title);
-    body.innerHTML = `<p class="sub">${escapeHtml(friendly.text)}</p>
-    ${error.detail ? `<button class="ghost" data-det>Details</button><div class="det" hidden>${escapeHtml(error.detail)}</div>` : ""}`;
-    const foot = document.createElement("div");
-    foot.className = "foot";
-    foot.innerHTML = `<span></span><span>${friendly.action ? `<button class="ghost" data-settings>${escapeHtml(friendly.action)}</button> ` : ""}<button class="go" data-close>Close</button></span>`;
-    body.parentElement.append(foot);
-    body.querySelector("[data-det]")?.addEventListener("click", () => {
-      const box = body.querySelector(".det");
-      box.hidden = !box.hidden;
-    });
-    foot.querySelector("[data-close]").addEventListener("click", closeDialog);
-    foot.querySelector("[data-settings]")?.addEventListener("click", () => {
-      void send({ type: "settings" });
-      closeDialog();
+    const { body, foot } = getOrCreateCard(friendly.title);
+    const subP = document.createElement("p");
+    subP.className = "sub";
+    subP.textContent = friendly.text;
+    body.append(subP);
+    if (error.detail) {
+      const detBtn = document.createElement("button");
+      detBtn.className = "ghost";
+      detBtn.setAttribute("data-det", "");
+      detBtn.textContent = "Details";
+      const detBox = document.createElement("div");
+      detBox.className = "det";
+      detBox.hidden = true;
+      detBox.textContent = error.detail;
+      detBtn.addEventListener("click", () => {
+        detBox.hidden = !detBox.hidden;
+      });
+      body.append(detBtn, detBox);
+    }
+    const footSpan1 = document.createElement("span");
+    const footSpan2 = document.createElement("span");
+    if (friendly.action) {
+      const actBtn = document.createElement("button");
+      actBtn.className = "ghost";
+      actBtn.setAttribute("data-settings", "");
+      actBtn.textContent = friendly.action;
+      actBtn.addEventListener("click", () => {
+        void send({ type: "settings" });
+        closeDialog();
+      });
+      footSpan2.append(actBtn, document.createTextNode(" "));
+    }
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "go";
+    closeBtn.setAttribute("data-close", "");
+    closeBtn.textContent = "Close";
+    closeBtn.addEventListener("click", closeDialog);
+    footSpan2.append(closeBtn);
+    foot.append(footSpan1, footSpan2);
+  }
+  if (typeof ext !== "undefined" && ext?.runtime?.onMessage) {
+    ext.runtime.onMessage.addListener((message) => {
+      if (message?.type !== "job" || !root) return void 0;
+      const job = message.job;
+      if (state.jobId === void 0 && state.awaitingJob) state.jobId = job.id;
+      if (job.id !== state.jobId) return void 0;
+      if (job.state === "completed") showDone(job);
+      else if (job.state === "failed") showError(job.error ?? { code: "FAILED", message: "The download failed." });
+      else if (job.state === "cancelled") closeDialog();
+      else updateProgress(job);
+      return void 0;
     });
   }
-  ext.runtime.onMessage.addListener((message) => {
-    if (message?.type !== "job" || !root) return void 0;
-    const job = message.job;
-    if (state.jobId === void 0 && state.awaitingJob) state.jobId = job.id;
-    if (job.id !== state.jobId) return void 0;
-    if (job.state === "completed") showDone(job);
-    else if (job.state === "failed") showError(job.error ?? { code: "FAILED", message: "The download failed." });
-    else if (job.state === "cancelled") closeDialog();
-    else showProgress(job);
-    return void 0;
-  });
-  window.addEventListener("yt-navigate-finish", onNavigate, true);
-  window.addEventListener("popstate", onNavigate, true);
-  onNavigate();
+  if (typeof window !== "undefined" && typeof document !== "undefined") {
+    window.addEventListener("yt-navigate-start", onNavigate, true);
+    window.addEventListener("yt-navigate-finish", onNavigate, true);
+    window.addEventListener("yt-page-data-updated", onNavigate, true);
+    window.addEventListener("yt-visibility-refresh", onNavigate, true);
+    window.addEventListener("popstate", onNavigate, true);
+    window.addEventListener("yt-action", (e) => {
+      const actionName = e?.detail?.actionName;
+      if (actionName && (String(actionName).includes("reel") || String(actionName).includes("navigate"))) {
+        onNavigate();
+      }
+    }, true);
+    document.addEventListener("DOMContentLoaded", onNavigate);
+    onNavigate();
+  }
 })();

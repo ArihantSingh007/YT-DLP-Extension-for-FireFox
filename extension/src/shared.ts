@@ -45,6 +45,7 @@ export interface Choice {
 
 export interface Job {
   id: string;
+  url?: string;
   state: "queued" | "downloading" | "processing" | "completed" | "failed" | "cancelled";
   title: string;
   label: string;
@@ -92,6 +93,30 @@ export interface Settings {
   overwrite: "never" | "overwrite";
   maxConcurrent: number;
   lastMode: Mode;
+  // Metadata & Media
+  embedThumbnail: boolean;
+  embedChapters: boolean;
+  embedMetadata: boolean;
+  // Subtitles
+  writeSubtitles: boolean;
+  writeAutoSubtitles: boolean;
+  embedSubtitles: boolean;
+  subLangs: string;
+  subFormat: "best" | "srt" | "vtt" | "ass" | "lrc";
+  // SponsorBlock
+  sponsorblockRemove: "off" | "sponsor" | "sponsor,selfpromo" | "sponsor,selfpromo,interaction" | "all";
+  sponsorblockMark: "off" | "sponsor" | "all";
+  // Network & Speed
+  rateLimit: string;
+  concurrentFragments: number;
+  proxy: string;
+  retries: number;
+  // Authentication & Cookies
+  cookiesBrowser: "none" | "firefox" | "chrome" | "edge" | "brave" | "chromium" | "vivaldi" | "opera";
+  // Audio
+  keepVideo: boolean;
+  // System
+  customArgs: string;
 }
 
 export const DEFAULTS: Settings = {
@@ -106,6 +131,23 @@ export const DEFAULTS: Settings = {
   overwrite: "never",
   maxConcurrent: 2,
   lastMode: "video",
+  embedThumbnail: true,
+  embedChapters: true,
+  embedMetadata: true,
+  writeSubtitles: false,
+  writeAutoSubtitles: false,
+  embedSubtitles: false,
+  subLangs: "en.*,all",
+  subFormat: "best",
+  sponsorblockRemove: "off",
+  sponsorblockMark: "off",
+  rateLimit: "",
+  concurrentFragments: 1,
+  proxy: "",
+  retries: 5,
+  cookiesBrowser: "none",
+  keepVideo: false,
+  customArgs: "",
 };
 
 export async function getSettings(): Promise<Settings> {

@@ -257,6 +257,57 @@ class NativeMessagingTests(unittest.TestCase):
         self.send({"id": "a6", "action": "get_info", "url": "https://evil.example.com/Ω Мир 🎧"})
         self.assertFalse(self.recv()["success"])
 
+    def test_open_file_path_traversal_refused(self):
+        self.send({"id": "b3", "action": "open_file", "path": "C:\\Windows\\System32\\cmd.exe"})
+        res = self.recv()
+        self.assertFalse(res["success"])
+        self.assertIn(res["error"]["code"], ("BAD_PATH", "FILE_NOT_FOUND"))
+
+    def test_open_file_nonexistent_refused(self):
+        root = os.path.abspath(os.path.expanduser("~"))
+        nonexistent = os.path.join(root, "definitely_nonexistent_file_12345.mp4")
+        self.send({"id": "b4", "action": "open_file", "path": nonexistent})
+        res = self.recv()
+        self.assertFalse(res["success"])
+        self.assertEqual(res["error"]["code"], "FILE_NOT_FOUND")
+
+    def test_open_file_unknown_job_refused(self):
+        self.send({"id": "b5", "action": "open_file", "jobId": "unknown_job_999"})
+        res = self.recv()
+        self.assertFalse(res["success"])
+        self.assertEqual(res["error"]["code"], "FILE_NOT_FOUND")
+
+    def test_open_folder_unknown_job_refused(self):
+        self.send({"id": "b6", "action": "open_folder", "jobId": "unknown_job_888"})
+        res = self.recv()
+        self.assertFalse(res["success"])
+        self.assertEqual(res["error"]["code"], "FILE_NOT_FOUND")
+
+    def test_open_folder_fallback_to_path_when_job_unknown(self):
+        # Even if jobId is not found in memory, passing a valid path in the download dir succeeds
+        status_res = self.send({"id": "s1", "action": "get_status"})
+        dl_dir = self.recv()["data"]["downloadDirectory"]
+        test_file = os.path.join(dl_dir, "test_yt_bridge_#music (prod) [xyz].txt")
+        try:
+            with open(test_file, "w") as f:
+                f.write("test")
+            self.send({"id": "b9", "action": "open_folder", "jobId": "unknown_job_777", "path": test_file})
+            res = self.recv()
+            self.assertTrue(res["success"])
+            self.assertTrue(res["data"]["opened"])
+        finally:
+            if os.path.exists(test_file):
+                os.remove(test_file)
+
+    def test_status_cached(self):
+        self.send({"id": "b7", "action": "get_status"})
+        r1 = self.recv()
+        self.assertTrue(r1["success"])
+        self.send({"id": "b8", "action": "get_status"})
+        r2 = self.recv()
+        self.assertTrue(r2["success"])
+        self.assertEqual(r1["data"]["hostVersion"], r2["data"]["hostVersion"])
+
 
 if __name__ == "__main__":
     unittest.main()

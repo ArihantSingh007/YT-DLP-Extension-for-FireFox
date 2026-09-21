@@ -73,17 +73,23 @@ native-host/
 docs/ SETUP.md DEVELOPMENT.md TROUBLESHOOTING.md SECURITY.md
 ```
 
-## Commands
+## Commands & Reproducible Build
+
+**Prerequisites:** Node.js 20 LTS (or newer), npm 10 (or newer), Python 3.9+.
 
 ```bash
-cd extension && npm install
-npm run build      # dist/  (unminified, so AMO reviewers can read it)
-npm run dev        # watch
+cd extension
+npm ci             # install exact pinned dependencies
+npm run build      # dist/ (unminified ES bundles for AMO reviewers)
+npm run dev        # watch & rebuild on changes
 npm run typecheck  # tsc --noEmit
-npm test           # 11 unit tests
-npm run package    # AMO-ready zip of dist/ only
+npm test           # 18 unit tests
+npm run package    # builds dist/ and packages both artifacts into web-ext-artifacts/:
+                   #  1. ytdlp-bridge-2.0.0.zip (Extension package for AMO)
+                   #  2. ytdlp-bridge-2.0.0-source.zip (Source code for AMO reviewers)
 
-cd ../native-host && python -m unittest discover -s tests   # 43 tests
+cd ../native-host
+python -m unittest discover -s tests -v   # 51 unit tests
 ```
 
 Load `extension/dist/manifest.json` via `about:debugging` while developing.
